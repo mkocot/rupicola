@@ -15,6 +15,8 @@ use hyper::status::StatusCode;
 use hyper::server::{Server, Request, /*Response,*/ Handler};
 use hyper::server::response::*;
 use hyper::uri::{RequestUri};
+use hyper::net::Openssl;
+
 use jsonrpc::{JsonRpcServer, JsonRpcRequest, ErrorCode};
 use std::process::*;
 use log::{LogRecord, LogLevel, LogMetadata};
@@ -69,15 +71,18 @@ impl Handler for SenderHandler {
                 }
             }
         } else {
-            *res.status_mut() = StatusCode::NotImplemented;
+            *res.status_mut() = StatusCode::MethodNotAllowed;
         }
     }
 }
 
 
 struct ServerConfig {
+    use_https: bool,
     address: String,
     port: u16,
+    cert: Option<String>,
+    key: Option<String>,
     methods: HashMap<String, MethodDefinition>,
     streams: HashMap<String, MethodDefinition>,
     log_level: log::LogLevelFilter
@@ -102,8 +107,11 @@ enum Variable {
 impl ServerConfig {
     pub fn new () -> ServerConfig {
         ServerConfig {
+            use_https: false,
             address: "127.0.0.1".to_string(),
             port: 1337,
+            cert: None,
+            key: None,
             methods: HashMap::new(),
             streams: HashMap::new(),
             log_level: log::LogLevelFilter::Info
@@ -204,7 +212,12 @@ fn read_config(config_file: &str) -> ServerConfig {
     if let Some(protocol_definition) = config_yaml["protocol"].as_hash() {
         info!("Parsing protocol definition");
         if let Some(protocol_type) = protocol_definition[&Yaml::String("type".to_string())].as_str() {
-            info!("Protocol type: {} (for now ignored)", protocol_type);
+            info!("Protocol type: {}", protocol_type);
+            if protocol_type == "https" {
+                server_config.cert = config_yaml["protocol"]["cert"].as_str().map(|o|o.to_owned());
+                server_config.key = config_yaml["protocol"]["key"].as_str().map(|o|o.to_owned());
+                server_config.use_https = true;
+            }
         }
         if let Some(address) = protocol_definition[&Yaml::String("address".to_string())].as_str() {
             info!("Address: {}", address);
@@ -414,6 +427,10 @@ fn main() {
     let config = read_config(config_file);
 
     set_log_level(config.log_level);
-
-    Server::http((&config.address as &str, config.port)).unwrap().handle(SenderHandler::new(config)).unwrap();
+    if config.use_https {
+        let ssl = Openssl::with_cert_and_key(&config.cert.clone().unwrap(), &config.key.clone().unwrap()).unwrap();
+        Server::https((&config.address as &str, config.port), ssl).unwrap().handle(SenderHandler::new(config)).unwrap();
+    } else {
+        Server::http((&config.address as &str, config.port)).unwrap().handle(SenderHandler::new(config)).unwrap();
+    }
 }
