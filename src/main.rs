@@ -1,35 +1,33 @@
-extern crate hyper;
-extern crate jsonrpc;
-extern crate rustc_serialize;
-#[macro_use]
-extern crate log;
+//Local files/dependencies
+mod config;
+
+//External dependencies
 #[macro_use]
 extern crate clap;
+extern crate hyper;
+extern crate jsonrpc;
+#[macro_use]
+extern crate log;
+extern crate rustc_serialize;
 extern crate yaml_rust;
-extern crate regex;
 
-use std::thread;
-use std::io::{Read, BufReader, BufRead, Write, BufWriter};
-use rustc_serialize::json::{ToJson, Json};
+use clap::App;
+use config::{ServerConfig, MethodDefinition, Variable};
 use hyper::status::StatusCode;
-use hyper::server::{Server, Request, /*Response,*/ Handler};
-use hyper::server::response::*;
+use hyper::server::{Server, Request, Response, Handler};
 use hyper::uri::{RequestUri};
 use hyper::net::Openssl;
-
 use jsonrpc::{JsonRpcServer, JsonRpcRequest, ErrorCode};
-use std::process::*;
 use log::{LogRecord, LogLevel, LogMetadata};
-use clap::App;
-use yaml_rust::{YamlLoader, Yaml};
-use std::fs::File;
-use regex::Regex;
-use std::collections::{HashMap, BTreeSet};
-use std::str::FromStr;
+use rustc_serialize::json::{ToJson, Json};
+use std::thread;
+use std::io::{Read, BufReader, BufRead, Write};
+use std::process::{Command, Stdio};
+use std::collections::HashMap;
+use yaml_rust::YamlLoader;
 
 
 struct SimpleLogger;
-
 impl log::Log for SimpleLogger {
     fn enabled(&self, metadata: &LogMetadata) -> bool {
         metadata.level() <= LogLevel::Info
@@ -42,19 +40,13 @@ impl log::Log for SimpleLogger {
     }
 }
 
-
-
-enum MethodType {
-    Dll,
-    Exec
-}
-
 struct SenderHandler {
     //unique client request tracing?
     request_id: u32,
-    json_rpc: JsonRpcServer,
+    json_rpc: JsonRpcServer<RpcHandler>,
     config: ServerConfig
 }
+
 impl Handler for SenderHandler {
     fn handle(&self, req: Request, mut res: Response) {
         //Only support of POST
@@ -76,194 +68,29 @@ impl Handler for SenderHandler {
     }
 }
 
-
-struct ServerConfig {
-    use_https: bool,
-    address: String,
-    port: u16,
-    cert: Option<String>,
-    key: Option<String>,
-    methods: HashMap<String, MethodDefinition>,
-    streams: HashMap<String, MethodDefinition>,
-    log_level: log::LogLevelFilter
+struct RpcHandler {
+    methods: HashMap<String, MethodDefinition>
 }
 
-struct MethodDefinition {
-    name: String,
-    path: String,
-    //how parse request
-    exec_params: Vec<String>,
-    variables: HashMap<String, Variable>,
-    use_fake_response: Option<Json>
-}
-
-enum Variable {
-    Positional(i32),
-    //variable_name
-    Named(String)
-}
-
-
-impl ServerConfig {
-    pub fn new () -> ServerConfig {
-        ServerConfig {
-            use_https: false,
-            address: "127.0.0.1".to_string(),
-            port: 1337,
-            cert: None,
-            key: None,
-            methods: HashMap::new(),
-            streams: HashMap::new(),
-            log_level: log::LogLevelFilter::Info
+impl RpcHandler {
+    pub fn new(methods: HashMap<String, MethodDefinition>) -> RpcHandler {
+        RpcHandler {
+            methods: methods
         }
     }
-}
-fn parse_methods(methods: &Vec<Yaml>, config_methods: &mut HashMap<String, MethodDefinition>) {
-        for method_def in methods {
-            //let method_def = &method_def_map["method"];
-            info!("{:?}", method_def);
-            let name = method_def["method"].as_str().unwrap();
-            info!("Name: {}", name);
-            let _type = method_def["type"].as_str().unwrap();
-            info!("Type: {}", _type);
-            let path = method_def["path"].as_str().unwrap();
-            info!("Path: {}", path);
-            let params = &method_def["params"];
-            let mut parameters = BTreeSet::<String>::new();
-
-            if params.is_null() || params.is_badvalue() {
-                info!("No parameters");
-            } else {
-                info!("Parameters: {:?}", params);
-                //get keys
-                if let Some(mapa) = params.as_hash() {
-                    for key in mapa.keys() {
-                        let key = key.as_str().unwrap();
-                        parameters.insert(key.to_string());
-                    }
-                }
-            }
-
-            let fake_response = if let Some(json) = method_def["fake_response"].as_str() {
-                Some(json.to_json())
-            } else {
-                None
-            };
-            //.map(Json::from_str)//unwrap_or(r(())).ok();
-
-            let mut variables_map = HashMap::<String, Variable>::new();
-            let mut variables = Vec::<String>::new();
-
-            if let Some(exec_params) = method_def["exec_params"].as_vec() {
-                for exec_param in exec_params {
-                    info!("Exec param: {:?}", exec_param);
-                    variables.push(exec_param.as_str().unwrap().to_string());
-                    //search for variables
-                    let re = Regex::new(r"(\$[\w]+)").unwrap();
-                    for variable in re.captures_iter(exec_param.as_str().unwrap()) {
-                        let variable_name = variable.at(1).unwrap();
-                        info!("Var name: {}", variable_name);
-                        if !variables_map.contains_key(variable_name) {
-                            //is that a number?
-                            let var = if let Ok(number) = i32::from_str(&variable_name[1..]) {
-                                Variable::Positional(number)
-                            } else {
-                                if parameters.contains(&variable_name[1..].to_string()) {
-                                Variable::Named(variable_name[1..].to_string())
-                                } else {
-                                    panic!("Unbound parameter {}", variable_name);
-                                }
-                            };
-                            variables_map.insert(variable_name.to_string(), var);
-                        }
-                    }
-                }
-            } else {
-                warn!("No exec params");
-            }
-            //check if all required variables are used
-            //for req_var in v
-            let method_definition = MethodDefinition {
-                name: name.to_string(),
-                path: path.to_string(),
-                //required parameters in rpc
-                //params: parameters,
-                //this contains app invocation arguments, each argument in its own 
-                exec_params: variables,
-                //this contains mapping from invocation input to method
-                variables: variables_map,
-                use_fake_response: fake_response
-            };
-            config_methods.insert(method_definition.name.clone(), method_definition);
-        }
-}
-fn read_config(config_file: &str) -> ServerConfig {
-    let mut server_config = ServerConfig::new();
-
-    info!("Using configuration from: {}", config_file);
-
-    //parse config file
-    let mut f = File::open(config_file).unwrap();
-    let mut s = String::new();
-    f.read_to_string(&mut s).unwrap();
-    let config = YamlLoader::load_from_str(&s).unwrap();
-    let config_yaml = &config[0];
-    
-    if let Some(protocol_definition) = config_yaml["protocol"].as_hash() {
-        info!("Parsing protocol definition");
-        if let Some(protocol_type) = protocol_definition[&Yaml::String("type".to_string())].as_str() {
-            info!("Protocol type: {}", protocol_type);
-            if protocol_type == "https" {
-                server_config.cert = config_yaml["protocol"]["cert"].as_str().map(|o|o.to_owned());
-                server_config.key = config_yaml["protocol"]["key"].as_str().map(|o|o.to_owned());
-                server_config.use_https = true;
-            }
-        }
-        if let Some(address) = protocol_definition[&Yaml::String("address".to_string())].as_str() {
-            info!("Address: {}", address);
-            server_config.address = address.to_owned();
-        }
-        if let Some(port) = protocol_definition[&Yaml::String("port".to_string())].as_i64() {
-            info!("Port: {}", port);
-            server_config.port = port as u16;
-        }
-    }
-
-    if let Some(methods) = config_yaml["methods"].as_vec() {
-        parse_methods(methods, &mut server_config.methods);
-    }
-
-    if let Some(streams) = config_yaml["streams"].as_vec() {
-        parse_methods(streams, &mut server_config.streams);
-    }
-
-    if let Some(log_level) = config_yaml["log"]["level"].as_str() {
-        server_config.log_level = match &log_level.to_lowercase() as &str {
-            "trace" => log::LogLevelFilter::Trace,
-            "debug" => log::LogLevelFilter::Debug,
-            "info" => log::LogLevelFilter::Info,
-            "warn" => log::LogLevelFilter::Warn,
-            "error" => log::LogLevelFilter::Error,
-            "off" => log::LogLevelFilter::Off,
-            unknown => {
-                //Just fallback to already set default
-                warn!("Unknown log level: {}", unknown);
-                server_config.log_level
-            }
-        };
-    }
-    server_config
 }
 
 impl SenderHandler {
     fn new(conf: ServerConfig) -> SenderHandler {
+        //Dont like it...
+        let json_handler = RpcHandler::new(conf.methods.clone());
+
         SenderHandler {
             request_id: 0,
-            json_rpc: JsonRpcServer::new(),
+            json_rpc: JsonRpcServer::new_handler(json_handler),
             config: conf
         }
     }
-
 
     fn handle_streaming(&self, mut req: Request, mut res: Response) {
         //Read streaming method name from path
@@ -329,8 +156,8 @@ impl SenderHandler {
             return;
         }
         info!("Request: {}", request);
-        let response = self.json_rpc.handle_custom(self, &request);
-        if response != "" {
+        let response = self.json_rpc.handle_request(&request);
+        if let Some(response) = response {
             info!("Response: {}", response);
             res.send(&response.into_bytes()).unwrap();
         } else {
@@ -339,10 +166,10 @@ impl SenderHandler {
     }
 }
 
-impl jsonrpc::Handler for SenderHandler {
+impl jsonrpc::Handler for RpcHandler {
     fn handle(&self, req: &JsonRpcRequest) -> Result<Json, ErrorCode> {
         info!("Call from callback!");
-        let method = self.config.methods.get(&req.method);
+        let method = self.methods.get(&req.method);
         if method.is_none() {
             error!("Requested method '{}' not found!", &req.method);
             return Err(ErrorCode::MethodNotFound)
@@ -358,7 +185,7 @@ impl jsonrpc::Handler for SenderHandler {
         //prepare arguments
         let mut arguments = Vec::new();
         for arg in &method.exec_params {
-            let mut arg = arg.clone();
+            let mut arg = arg.to_string();
             info!("Argument before evaluation {}", arg);
             for (key,value) in &method.variables {
                 info!("Evaluation: {}", key);
@@ -424,11 +251,11 @@ fn main() {
     let m = App::from_yaml(yml).get_matches();
 
     let config_file = m.value_of("config").unwrap();
-    let config = read_config(config_file);
-
+    let config = ServerConfig::read_from_file(config_file);
     set_log_level(config.log_level);
+
     if config.use_https {
-        let ssl = Openssl::with_cert_and_key(&config.cert.clone().unwrap(), &config.key.clone().unwrap()).unwrap();
+        let ssl = Openssl::with_cert_and_key(&config.cert.as_ref().unwrap(), &config.key.as_ref().unwrap()).unwrap();
         Server::https((&config.address as &str, config.port), ssl).unwrap().handle(SenderHandler::new(config)).unwrap();
     } else {
         Server::http((&config.address as &str, config.port)).unwrap().handle(SenderHandler::new(config)).unwrap();
