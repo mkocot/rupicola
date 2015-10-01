@@ -23,11 +23,21 @@ use rustc_serialize::json::{ToJson, Json};
 use std::thread;
 use std::io::{Read, BufReader, BufRead, Write};
 use std::process::{Command, Stdio};
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 use yaml_rust::YamlLoader;
 
 
 struct SimpleLogger;
+struct SenderHandler {
+    //unique client request tracing?
+    request_id: u32,
+    json_rpc: JsonRpcServer<RpcHandler>,
+    config: ServerConfig
+}
+struct RpcHandler {
+    methods: HashMap<String, MethodDefinition>
+}
+
 impl log::Log for SimpleLogger {
     fn enabled(&self, metadata: &LogMetadata) -> bool {
         metadata.level() <= LogLevel::Info
@@ -38,13 +48,6 @@ impl log::Log for SimpleLogger {
             println!("{} - {}", record.level(), record.args());
         }
     }
-}
-
-struct SenderHandler {
-    //unique client request tracing?
-    request_id: u32,
-    json_rpc: JsonRpcServer<RpcHandler>,
-    config: ServerConfig
 }
 
 impl Handler for SenderHandler {
@@ -68,9 +71,6 @@ impl Handler for SenderHandler {
     }
 }
 
-struct RpcHandler {
-    methods: HashMap<String, MethodDefinition>
-}
 
 impl RpcHandler {
     pub fn new(methods: HashMap<String, MethodDefinition>) -> RpcHandler {
@@ -134,8 +134,11 @@ impl SenderHandler {
         //Pipe stdout
         let stdout_stream = child_process.stdout.unwrap();
         let mut streaming_response = res.start().unwrap();
+        //Read as hytes chunks
         let reader = BufReader::new(stdout_stream);
         for line in reader.lines() {
+            //TODO: Panic on invalid utf-8! We should be able to read it anyway, and replace
+            //spurious characters with eg. "?"
             let line = line.unwrap();
             info!("<-- {}", line);
             let bytes = line.into_bytes();
@@ -145,6 +148,7 @@ impl SenderHandler {
         }
         info!("Reading STDOUT finished");
         streaming_response.end().unwrap();
+        //todo: Detect when connection is killed and kill child process
     }
 
     fn handle_json_rpc(&self, mut req: Request, res: Response) {
@@ -175,11 +179,16 @@ impl jsonrpc::Handler for RpcHandler {
             return Err(ErrorCode::MethodNotFound)
         }
         let method = method.unwrap();
-        
+       
+        //TODO: For now hackish solution
         let params = if let Some(ref p) = req.params {
-            p.as_object().unwrap()
+            p.as_object().unwrap().to_owned()
         } else {
-            return Err(ErrorCode::InvalidParams);
+            //Report error only if we need some parameters
+            if !method.variables.is_empty() {
+                return Err(ErrorCode::InvalidParams);
+            }
+            BTreeMap::new()
         };
 
         //prepare arguments

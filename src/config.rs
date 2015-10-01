@@ -9,7 +9,7 @@ extern crate regex;
 use std::io::{Read};
 use rustc_serialize::json::{ToJson, Json};
 use yaml_rust::{YamlLoader, Yaml};
-use regex::Regex;
+use self::regex::Regex;
 use std::collections::{HashMap, BTreeSet};
 use std::str::FromStr;
 use std::fs::File;
