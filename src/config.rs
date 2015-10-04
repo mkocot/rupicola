@@ -53,7 +53,7 @@ impl ServerConfig {
     pub fn new () -> ServerConfig {
         ServerConfig {
             use_https: false,
-            address: "127.0.0.1".to_string(),
+            address: "127.0.0.1".to_owned(),
             port: 1337,
             cert: None,
             key: None,
@@ -77,7 +77,7 @@ impl ServerConfig {
         
         if let Some(protocol_definition) = config_yaml["protocol"].as_hash() {
             info!("Parsing protocol definition");
-            if let Some(protocol_type) = protocol_definition[&Yaml::String("type".to_string())].as_str() {
+            if let Some(protocol_type) = protocol_definition[&Yaml::String("type".to_owned())].as_str() {
                 info!("Protocol type: {}", protocol_type);
                 if protocol_type == "https" {
                     server_config.cert = config_yaml["protocol"]["cert"].as_str().map(|o|o.to_owned());
@@ -85,11 +85,11 @@ impl ServerConfig {
                     server_config.use_https = true;
                 }
             }
-            if let Some(address) = protocol_definition[&Yaml::String("address".to_string())].as_str() {
+            if let Some(address) = protocol_definition[&Yaml::String("address".to_owned())].as_str() {
                 info!("Address: {}", address);
                 server_config.address = address.to_owned();
             }
-            if let Some(port) = protocol_definition[&Yaml::String("port".to_string())].as_i64() {
+            if let Some(port) = protocol_definition[&Yaml::String("port".to_owned())].as_i64() {
                 info!("Port: {}", port);
                 server_config.port = port as u16;
             }
@@ -143,7 +143,7 @@ fn parse_methods(methods: &Vec<Yaml>, config_methods: &mut HashMap<String, Metho
             if let Some(mapa) = params.as_hash() {
                 for key in mapa.keys() {
                     let key = key.as_str().unwrap();
-                    parameters.insert(key.to_string());
+                    parameters.insert(key.to_owned());
                 }
             }
         }
@@ -160,7 +160,7 @@ fn parse_methods(methods: &Vec<Yaml>, config_methods: &mut HashMap<String, Metho
         if let Some(exec_params) = method_def["exec_params"].as_vec() {
             for exec_param in exec_params {
                 info!("Exec param: {:?}", exec_param);
-                variables.push(exec_param.as_str().unwrap().to_string());
+                variables.push(exec_param.as_str().unwrap().to_owned());
                 //search for variables
                 let re = Regex::new(r"(\$[\w]+)").unwrap();
                 for variable in re.captures_iter(exec_param.as_str().unwrap()) {
@@ -171,13 +171,13 @@ fn parse_methods(methods: &Vec<Yaml>, config_methods: &mut HashMap<String, Metho
                         let var = if let Ok(number) = i32::from_str(&variable_name[1..]) {
                             Variable::Positional(number)
                         } else {
-                            if parameters.contains(&variable_name[1..].to_string()) {
-                            Variable::Named(variable_name[1..].to_string())
+                            if parameters.contains(&variable_name[1..].to_owned()) {
+                            Variable::Named(variable_name[1..].to_owned())
                             } else {
                                 panic!("Unbound parameter {}", variable_name);
                             }
                         };
-                        variables_map.insert(variable_name.to_string(), var);
+                        variables_map.insert(variable_name.to_owned(), var);
                     }
                 }
             }
@@ -185,8 +185,8 @@ fn parse_methods(methods: &Vec<Yaml>, config_methods: &mut HashMap<String, Metho
             warn!("No exec params");
         }
         let method_definition = MethodDefinition {
-            name: name.to_string(),
-            path: path.to_string(),
+            name: name.to_owned(),
+            path: path.to_owned(),
             //this contains app invocation arguments, each argument in its own 
             exec_params: variables,
             //this contains mapping from invocation input to method

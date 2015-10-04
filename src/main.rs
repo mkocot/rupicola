@@ -17,7 +17,7 @@ use hyper::status::StatusCode;
 use hyper::server::{Server, Request, Response, Handler};
 use hyper::uri::{RequestUri};
 use hyper::net::Openssl;
-use jsonrpc::{JsonRpcServer, JsonRpcRequest, ErrorCode};
+use jsonrpc::{JsonRpcServer, JsonRpcRequest, ErrorCode, ErrorCodeData};
 use log::{LogRecord, LogLevel, LogMetadata};
 use rustc_serialize::json::{ToJson, Json};
 use std::thread;
@@ -136,13 +136,12 @@ impl SenderHandler {
         let mut streaming_response = res.start().unwrap();
         //Read as hytes chunks
         let reader = BufReader::new(stdout_stream);
-        for line in reader.lines() {
-            //TODO: Panic on invalid utf-8! We should be able to read it anyway, and replace
-            //spurious characters with eg. "?"
+        for line in reader.split(b'\n') {
             let line = line.unwrap();
-            info!("<-- {}", line);
-            let bytes = line.into_bytes();
-            streaming_response.write(&bytes).unwrap();
+            //Ignore all non utf8 characters (well this is log anyway)
+            info!("<-- {}", String::from_utf8_lossy(&line));
+            //Respond to client with content "as-is" 
+            streaming_response.write(&line).unwrap();
             streaming_response.write(b"\n").unwrap();
             streaming_response.flush().unwrap();
         }
@@ -171,12 +170,12 @@ impl SenderHandler {
 }
 
 impl jsonrpc::Handler for RpcHandler {
-    fn handle(&self, req: &JsonRpcRequest) -> Result<Json, ErrorCode> {
+    fn handle(&self, req: &JsonRpcRequest) -> Result<Json, ErrorCodeData> {
         info!("Call from callback!");
         let method = self.methods.get(&req.method);
         if method.is_none() {
             error!("Requested method '{}' not found!", &req.method);
-            return Err(ErrorCode::MethodNotFound)
+            return Err(ErrorCodeData::Without(ErrorCode::MethodNotFound))
         }
         let method = method.unwrap();
        
@@ -186,7 +185,7 @@ impl jsonrpc::Handler for RpcHandler {
         } else {
             //Report error only if we need some parameters
             if !method.variables.is_empty() {
-                return Err(ErrorCode::InvalidParams);
+                return Err(ErrorCodeData::Without(ErrorCode::InvalidParams));
             }
             BTreeMap::new()
         };
@@ -194,13 +193,18 @@ impl jsonrpc::Handler for RpcHandler {
         //prepare arguments
         let mut arguments = Vec::new();
         for arg in &method.exec_params {
-            let mut arg = arg.to_string();
+            let mut arg = arg.clone();
             info!("Argument before evaluation {}", arg);
             for (key,value) in &method.variables {
                 info!("Evaluation: {}", key);
                 match *value {
                     Variable::Named(ref name) => {
-                        arg = arg.replace(key, params.get(name).unwrap().as_string().unwrap());
+                        if let Some(value) = params.get(name) {
+                        arg = arg.replace(key, value.as_string().unwrap());
+                        } else {
+                            error!("Requested parameters {} not found!", key);
+                            return Err(ErrorCodeData::Without(ErrorCode::InvalidParams));
+                        }
                     }
                     _ => {}
                 };
@@ -233,7 +237,7 @@ impl jsonrpc::Handler for RpcHandler {
                 .args(&arguments)
                 .output()
                 .map(|o|String::from_utf8_lossy(&o.stdout).to_json())
-                .map_err(|_| ErrorCode::InvalidParams);
+                .map_err(|_| ErrorCodeData::Without(ErrorCode::InvalidParams));
             return output;
         }
     }
