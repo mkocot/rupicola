@@ -12,11 +12,12 @@ extern crate rustc_serialize;
 extern crate yaml_rust;
 
 use clap::App;
-use config::{ServerConfig, MethodDefinition, Variable};
+use config::{ServerConfig, MethodDefinition, Variable, AuthMethod};
 use hyper::status::StatusCode;
 use hyper::server::{Server, Request, Response, Handler};
 use hyper::uri::{RequestUri};
 use hyper::net::Openssl;
+use hyper::header::{Headers, Authorization, Basic};
 use jsonrpc::{JsonRpcServer, JsonRpcRequest, ErrorCode, ErrorCodeData};
 use log::{LogRecord, LogLevel, LogMetadata};
 use rustc_serialize::json::{ToJson, Json};
@@ -26,7 +27,6 @@ use std::process::{Command, Stdio};
 use std::collections::{BTreeMap, HashMap};
 use yaml_rust::YamlLoader;
 
-
 struct SimpleLogger;
 struct SenderHandler {
     //unique client request tracing?
@@ -34,6 +34,7 @@ struct SenderHandler {
     json_rpc: JsonRpcServer<RpcHandler>,
     config: ServerConfig
 }
+
 struct RpcHandler {
     methods: HashMap<String, MethodDefinition>
 }
@@ -53,7 +54,16 @@ impl log::Log for SimpleLogger {
 impl Handler for SenderHandler {
     fn handle(&self, req: Request, mut res: Response) {
         //Only support of POST
-        info!("Processing request from {}. Method {}. Uri {}", req.remote_addr, req.method, req.uri);
+        info!("Processing request from {}. Method {}. Uri {}", req.remote_addr,
+              req.method, req.uri);
+
+        if !self.is_request_authorized(&req) {
+            //TODO: is there build-in for this?
+            res.headers_mut().set_raw("WWW-Authenticate", vec![b"Basic".to_vec()]);
+            *res.status_mut() = StatusCode::Unauthorized;
+            return;
+        }
+
         if req.method == hyper::Post {
             if let RequestUri::AbsolutePath(ref path) = req.uri.clone() {
                 match path as &str {
@@ -66,6 +76,7 @@ impl Handler for SenderHandler {
                 }
             }
         } else {
+            warn!("GET is not supported");
             *res.status_mut() = StatusCode::MethodNotAllowed;
         }
     }
@@ -92,10 +103,35 @@ impl SenderHandler {
         }
     }
 
+    fn is_request_authorized(&self, req: &Request) -> bool {
+        match self.config.auth {
+            AuthMethod::Basic { ref login, ref pass } => {
+                info!("Using basic auth");
+                //check if user provided required credentials
+                let auth_heder = req.headers.get::<Authorization<Basic>>();
+                if let Some(ref auth) = auth_heder {
+                    //ok
+                    let password = auth.password.clone().unwrap_or("".to_owned());
+                    if auth.username != *login 
+                        || password != *pass {
+                        warn!("Invalid username or password");
+                        false
+                    } else {
+                        info!("Access granted");
+                        true
+                    }
+                } else {
+                    error!("Required basic auth and got none!");
+                    false
+                }
+            },
+            AuthMethod::None => true,
+        }
+    }
+
     fn handle_streaming(&self, mut req: Request, mut res: Response) {
         //Read streaming method name from path
         // POST /streaming
-        // {"method": "enter method name here", "params": "Optional params", "id": "optional id"}
         let mut request_str = String::new();
         //TODO: Limit read size
         req.read_to_string(&mut request_str).unwrap();
@@ -208,7 +244,6 @@ impl jsonrpc::Handler for RpcHandler {
                     }
                     _ => {}
                 };
-                //arg = arg.replace(var.key, req.params[var.value]
             }
             info!("Argument after evaluation {}", arg);
             arguments.push(arg);
@@ -222,6 +257,8 @@ impl jsonrpc::Handler for RpcHandler {
                 info!("Executing delayed command");
                 match Command::new(&path).args(&arguments).output() {
                     Ok(o) => {
+                        //Log as lossy utf8.
+                        //TODO: Limit output size? Eg cat on whole partition?
                         info!("Execution finished\nStatus: {}\nStdout: {}\nStderr: {}\n",
                                o.status,
                                String::from_utf8_lossy(&o.stdout),
@@ -268,9 +305,16 @@ fn main() {
     set_log_level(config.log_level);
 
     if config.use_https {
-        let ssl = Openssl::with_cert_and_key(&config.cert.as_ref().unwrap(), &config.key.as_ref().unwrap()).unwrap();
-        Server::https((&config.address as &str, config.port), ssl).unwrap().handle(SenderHandler::new(config)).unwrap();
+        let ssl = Openssl::with_cert_and_key(&config.cert.as_ref().unwrap(), 
+                                             &config.key.as_ref().unwrap()).unwrap();
+        Server::https((&config.address as &str, config.port), ssl)
+            .unwrap()
+            .handle(SenderHandler::new(config))
+            .unwrap();
     } else {
-        Server::http((&config.address as &str, config.port)).unwrap().handle(SenderHandler::new(config)).unwrap();
+        Server::http((&config.address as &str, config.port))
+            .unwrap()
+            .handle(SenderHandler::new(config))
+            .unwrap();
     }
 }

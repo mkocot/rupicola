@@ -14,6 +14,10 @@ use std::collections::{HashMap, BTreeSet};
 use std::str::FromStr;
 use std::fs::File;
 
+pub enum AuthMethod {
+    None,
+    Basic { login: String, pass: String }
+}
 
 pub enum MethodType {
     Dll,
@@ -28,7 +32,8 @@ pub struct ServerConfig {
     pub key: Option<String>,
     pub methods: HashMap<String, MethodDefinition>,
     pub streams: HashMap<String, MethodDefinition>,
-    pub log_level: log::LogLevelFilter
+    pub log_level: log::LogLevelFilter,
+    pub auth: AuthMethod,
 }
 
 #[derive(Clone)]
@@ -59,7 +64,8 @@ impl ServerConfig {
             key: None,
             methods: HashMap::new(),
             streams: HashMap::new(),
-            log_level: log::LogLevelFilter::Info
+            log_level: log::LogLevelFilter::Info,
+            auth: AuthMethod::None
         }
     }
 
@@ -93,6 +99,22 @@ impl ServerConfig {
                 info!("Port: {}", port);
                 server_config.port = port as u16;
             }
+            //we want basic auth?
+            let basic_auth_config = &config_yaml["protocol"]["auth-basic"];
+            if !basic_auth_config.is_badvalue() {
+                //Ok we get non empty node check if we have all required fields
+                match (&basic_auth_config["login"], &basic_auth_config["password"]) {
+                    (&Yaml::String(ref login), &Yaml::String(ref password)) => {
+                        info!("Using basic auth");
+                        server_config.auth = AuthMethod::Basic { login: login.to_owned(), pass: password.to_owned() }
+                    },
+                    (&Yaml::String(_), _)  => warn!("basic-auth: login field required"),
+                    (_, &Yaml::String(_)) => warn!("basic-auth: password field required"),
+                    _ => warn!("Invalid basic-auth definition!")
+                }
+            } else {
+                warn!("Server is free4all. Consider using some kind of auth");
+            }
         }
 
         if let Some(methods) = config_yaml["methods"].as_vec() {
@@ -125,20 +147,14 @@ impl ServerConfig {
 fn parse_methods(methods: &Vec<Yaml>, config_methods: &mut HashMap<String, MethodDefinition>) {
     for method_def in methods {
         //let method_def = &method_def_map["method"];
-        info!("{:?}", method_def);
         let name = method_def["method"].as_str().unwrap();
-        info!("Name: {}", name);
         let _type = method_def["type"].as_str().unwrap();
-        info!("Type: {}", _type);
         let path = method_def["path"].as_str().unwrap();
-        info!("Path: {}", path);
         let params = &method_def["params"];
         let mut parameters = BTreeSet::<String>::new();
 
         if params.is_null() || params.is_badvalue() {
-            info!("No parameters");
         } else {
-            info!("Parameters: {:?}", params);
             //get keys
             if let Some(mapa) = params.as_hash() {
                 for key in mapa.keys() {
@@ -159,13 +175,11 @@ fn parse_methods(methods: &Vec<Yaml>, config_methods: &mut HashMap<String, Metho
 
         if let Some(exec_params) = method_def["exec_params"].as_vec() {
             for exec_param in exec_params {
-                info!("Exec param: {:?}", exec_param);
                 variables.push(exec_param.as_str().unwrap().to_owned());
                 //search for variables
                 let re = Regex::new(r"(\$[\w]+)").unwrap();
                 for variable in re.captures_iter(exec_param.as_str().unwrap()) {
                     let variable_name = variable.at(1).unwrap();
-                    info!("Var name: {}", variable_name);
                     if !variables_map.contains_key(variable_name) {
                         //is that a number?
                         let var = if let Ok(number) = i32::from_str(&variable_name[1..]) {
@@ -182,7 +196,6 @@ fn parse_methods(methods: &Vec<Yaml>, config_methods: &mut HashMap<String, Metho
                 }
             }
         } else {
-            warn!("No exec params");
         }
         let method_definition = MethodDefinition {
             name: name.to_owned(),
