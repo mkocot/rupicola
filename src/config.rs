@@ -6,6 +6,7 @@ extern crate clap;
 extern crate yaml_rust;
 extern crate regex;
 
+use std::collections::VecDeque;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::io::{Read};
@@ -57,6 +58,15 @@ pub enum FutureVar {
     //This is ref to parameter definition
     Variable(ParameterDefinition),
     Chained(Vec<FutureVar>)
+}
+
+impl FutureVar {
+    pub fn is_constant(&self) -> bool {
+        match *self {
+            FutureVar::Constant(_) => true,
+            _ => false
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -162,6 +172,129 @@ impl ServerConfig {
     }
 }
 
+fn extract_param (h: &Yaml, parameters: &HashMap<String, ParameterDefinition>) -> Option<FutureVar> {
+    //Only support if this is {param: name} case
+    match h["param"].as_str() {
+        Some(s) => {
+            let param_ref = parameters.get(s);
+            match param_ref {
+                None => {
+                    error!("No binding for {:?}", s);
+                    None
+                },
+                Some(s) => {
+                    Some(FutureVar::Variable(s.clone()))
+                }
+            }
+        },//todo: continue for outer loop
+        None => {
+            error!("Expected {{param: name}}, but found {:?}", h["param"]);
+            None
+        }
+    }
+}
+
+fn parse_param(exec_param: &Yaml, parameters: &HashMap<String, ParameterDefinition>) -> Result<FutureVar, ()> {
+    //this should make FLAT structure in future
+    info!("Exec param: {:?}", exec_param);
+
+    fn extract_simple(exec_param: &Yaml, parameters: &HashMap<String, ParameterDefinition>) -> Result<FutureVar, ()> {
+        //Bind all simple types
+        if let Some(c) = match *exec_param {
+            Yaml::Real(ref s) | Yaml::String(ref s) => Some(s.to_owned()),
+            Yaml::Integer(ref i) => Some(i.to_string()),
+            Yaml::Boolean(ref b) => Some(b.to_string()),
+            //Complex types
+            _ => None
+        } {
+            return Ok(FutureVar::Constant(c));
+        }
+        //Do we have simple parameter reference here?
+        if exec_param.as_hash().is_some() {
+            match exec_param["param"]
+            .as_str()
+            .ok_or("Expected {{param: name}} object!")
+            .and_then(|s|parameters.get(s).ok_or("No binding for variable."))
+            .map(|s|FutureVar::Variable(s.clone())) {
+                Ok(s) => return Ok(s),
+                Err(e) => {
+                    error!("Error: processing {:?} - {}", exec_param["param"], e);
+                    return Err(());
+                }
+            }
+        }
+        Err(())
+    };
+    //Now comes the bad one...
+
+    if let Some(v) = exec_param.as_vec() {
+        //for now just assume this is non nested string array
+        let mut ugly_solution = Vec::new();
+        //Convert current vector to queue
+        let mut current_queue: VecDeque<_> = v.iter().collect();
+        info!("Nested structure: {:?}", current_queue);
+
+        while !current_queue.is_empty() {
+            //At this point we know it never be empty
+            let element = current_queue.pop_front().unwrap();
+            match *element {
+                //is this simple and well known thingy?
+                Yaml::String(_) | Yaml::Real(_) | Yaml::Integer(_) | Yaml::Boolean(_)
+                | Yaml::Hash(_) => {
+                    let item = extract_simple(&element, parameters).unwrap();
+
+                    let to_add = if ugly_solution.is_empty() || !item.is_constant() {
+                        item
+                    } else {
+                        let last_item = ugly_solution.pop().unwrap();
+                        match last_item {
+                            FutureVar::Constant(ref s) => { //create new constant
+                                let current_item = match item {
+                                    FutureVar::Constant(s) => s,
+                                    _ => panic!("Impossibru")
+                                };
+                                let mut a = s.clone();
+                                a.push_str(&current_item);
+                                info!("Merged: {:?}", a);
+                                FutureVar::Constant(a.to_owned())},
+                            _ => {
+                                info!("Put back");
+                                ugly_solution.push(last_item);
+                                item
+                            }
+                        }
+                    };
+                    ugly_solution.push(to_add);
+                }
+                Yaml::Array(ref array) => {
+                    //ok just shrink by one
+                    //Everytime we get there we reomve one level of
+                    //We need reverse order when adding parametes
+                    //so firs element in array is first in queue
+                    for item in array.iter().rev() {
+                        info!("Pushing to queue {:?}", item);
+                        current_queue.push_front(item);
+                    }
+                }
+                _ => error!("Unsupported element: {:?}", element)
+            }
+        }
+        info!("Final single chain: {:?}", ugly_solution);
+        //Great we should have single level vector
+        //In case of single element just return it without wrapper
+        if ugly_solution.len() == 1 {
+            info!("Final chain is single item. Just return this element");
+            return Ok(ugly_solution.pop().unwrap());
+        }
+        return Ok(FutureVar::Chained(ugly_solution));
+    } else {
+        //Just for printing error
+        extract_simple(exec_param, parameters).map_err(|_|{
+                error!("Unsupported param type");
+            })
+    }
+}
+
 fn parse_methods(methods: &BTreeMap<Yaml, Yaml>, config_methods: &mut HashMap<String, MethodDefinition>) {
     for (method_name, method_def) in methods {
         //Name method MUST be string
@@ -218,73 +351,6 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>, config_methods: &mut HashMap<St
 
         //let mut variables_map = HashMap::<String, Variable>::new();
         let mut variables = Vec::<FutureVar>::new();
-
-        fn extract_param (h: &Yaml, parameters: &HashMap<String, ParameterDefinition>) -> Option<FutureVar> {
-            //Only support if this is {param: name} case
-            match h["param"].as_str() {
-                Some(s) => {
-                    let param_ref = parameters.get(s);
-                    match param_ref {
-                        None => {
-                            error!("No binding for {:?}", s);
-                            None
-                        },
-                        Some(s) => {
-                            Some(FutureVar::Variable(s.clone()))
-                        }
-                    }
-                },//todo: continue for outer loop
-                None => {
-                    error!("Expected {{param: name}}, but found {:?}", h["param"]);
-                    None
-                }
-            }
-        };
-
-        fn parse_param(exec_param: &Yaml, parameters: &HashMap<String, ParameterDefinition>) -> Result<FutureVar, ()> {
-            //this should make FLAT structure in future
-            info!("Exec param: {:?}", exec_param);
-            if let Some(s) = exec_param.as_str() {
-                info!("Vulgaris string");
-                return Ok(FutureVar::Constant(s.to_owned()));
-            } else if let Some(v) = exec_param.as_vec() {
-                info!("Ok this is complicated");
-                //for now just assume this is non nested string array
-                let mut ugly_solution = Vec::new();
-                for element in v {
-                    match *element {
-                        Yaml::String(ref s) => ugly_solution.push(FutureVar::Constant(s.to_owned())),
-                        Yaml::Hash(_) => {
-                            match extract_param(element, parameters) {
-                                Some(s) => ugly_solution.push(s),
-                                None => error!("Expected {{param: name}}, but found {:?}", exec_param["param"])
-                            }
-                        },
-                        Yaml::Array(_) => {
-                            //In case of vector we just grab it and pass down
-                            ugly_solution.push(parse_param(element, parameters).unwrap());
-                        }
-                        _ => error!("Unsupported element: {:?}", element)
-                    }
-                    info!("Element: {:?}", element);
-                }
-                return Ok(FutureVar::Chained(ugly_solution));
-            } else if let Some(m) = exec_param.as_hash() {
-                //Only support if this is {param: name} case
-                match extract_param(exec_param, parameters) {
-                    Some(s) => {
-                        return Ok(s)
-                    },//todo: continue for outer loop
-                    None => {
-                        error!("Expected {{param: name}}, but found {:?}", exec_param["param"]);
-                        return Err(());
-                    }
-                }
-            } else {
-                error!("Unsupported param type");
-                return Err(());
-            }
-        }
 
         if let Some(exec_params) = invoke["args"].as_vec() {
             for exec_param in exec_params {
