@@ -56,7 +56,7 @@ pub enum FutureVar {
     Constant(String),
     //This is ref to parameter definition
     Variable(ParameterDefinition),
-    Chained(Box<Vec<FutureVar>>)
+    Chained(Vec<FutureVar>)
 }
 
 #[derive(Debug, Clone)]
@@ -260,7 +260,7 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>, config_methods: &mut HashMap<St
                                 None => error!("Expected {{param: name}}, but found {:?}", exec_param["param"])
                             }
                         },
-                        Yaml::Array(ref v) => {
+                        Yaml::Array(_) => {
                             //In case of vector we just grab it and pass down
                             ugly_solution.push(parse_param(element, parameters).unwrap());
                         }
@@ -268,7 +268,7 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>, config_methods: &mut HashMap<St
                     }
                     info!("Element: {:?}", element);
                 }
-                return Ok(FutureVar::Chained(Box::new(ugly_solution)));
+                return Ok(FutureVar::Chained(ugly_solution));
             } else if let Some(m) = exec_param.as_hash() {
                 //Only support if this is {param: name} case
                 match extract_param(exec_param, parameters) {
