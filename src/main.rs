@@ -12,13 +12,13 @@ extern crate rustc_serialize;
 extern crate yaml_rust;
 
 use clap::App;
-use config::{ServerConfig, MethodDefinition, Variable, AuthMethod};
+use config::*;
 use hyper::status::StatusCode;
 use hyper::server::{Server, Request, Response, Handler};
 use hyper::uri::{RequestUri};
 use hyper::net::Openssl;
-use hyper::header::{Headers, Authorization, Basic};
-use jsonrpc::{JsonRpcServer, JsonRpcRequest, ErrorCode, ErrorCodeData};
+use hyper::header::{Authorization, Basic};
+use jsonrpc::{JsonRpcServer, JsonRpcRequest, ErrorCode, ErrorJsonRpc};
 use log::{LogRecord, LogLevel, LogMetadata};
 use rustc_serialize::json::{ToJson, Json};
 use std::thread;
@@ -112,7 +112,7 @@ impl SenderHandler {
                 if let Some(ref auth) = auth_heder {
                     //ok
                     let password = auth.password.clone().unwrap_or("".to_owned());
-                    if auth.username != *login 
+                    if auth.username != *login
                         || password != *pass {
                         warn!("Invalid username or password");
                         false
@@ -145,7 +145,7 @@ impl SenderHandler {
             *res.status_mut() = StatusCode::NotFound;
             return;
         };
-        
+
         let method = self.config.streams.get(method_name);
         if method.is_none() {
             warn!("Requested method {} not found", method_name);
@@ -157,7 +157,10 @@ impl SenderHandler {
         //For now: No parameters parsing
         let mut arguments = Vec::new();
         for arg in &method.exec_params {
-            arguments.push(arg);
+            match *arg {
+                FutureVar::Constant(ref s) => arguments.push(s),
+                _ => error!("Unsupported: {:?}", arg)
+            }
         }
         info!("Spawn child for {} with args: {:?}", method_name, arguments);
 
@@ -176,7 +179,7 @@ impl SenderHandler {
             let line = line.unwrap();
             //Ignore all non utf8 characters (well this is log anyway)
             info!("<-- {}", String::from_utf8_lossy(&line));
-            //Respond to client with content "as-is" 
+            //Respond to client with content "as-is"
             streaming_response.write(&line).unwrap();
             streaming_response.write(b"\n").unwrap();
             streaming_response.flush().unwrap();
@@ -205,55 +208,65 @@ impl SenderHandler {
     }
 }
 
+fn unroll_variables(future: &FutureVar, params: &BTreeMap<String, Json>) -> Result<String,()> {
+//NOTE: Deep check should be done on config parse level
+    match *future {
+        FutureVar::Constant(ref s) => Ok(s.clone()),
+        FutureVar::Variable(ref v) => {
+            //get info from params
+            info!("Variable: {:?}", v);
+            match params.get(&v.name) {
+                Some(s) => Ok(s.as_string().unwrap().to_owned()),
+                None if !v.optional => {
+                    error!("Missing required param {:?}", v.name);
+                    return Err(());
+                }
+                //Meh
+                _ => {Ok("".to_owned())}
+            }
+        }
+        FutureVar::Chained(ref c) => {
+            let mut result = String::new();
+            for e in c.iter() {
+                result.push_str(&unroll_variables(e, params).unwrap());
+            }
+            Ok(result)
+        }
+    }
+}
+
 impl jsonrpc::Handler for RpcHandler {
-    fn handle(&self, req: &JsonRpcRequest) -> Result<Json, ErrorCodeData> {
+    fn handle(&self, req: &JsonRpcRequest) -> Result<Json, ErrorJsonRpc> {
         info!("Call from callback!");
         let method = self.methods.get(&req.method);
         if method.is_none() {
             error!("Requested method '{}' not found!", &req.method);
-            return Err(ErrorCodeData::Without(ErrorCode::MethodNotFound))
+            return Err(ErrorJsonRpc::new(ErrorCode::MethodNotFound))
         }
         let method = method.unwrap();
-       
+
         //TODO: For now hackish solution
         let params = if let Some(ref p) = req.params {
             p.as_object().unwrap().to_owned()
         } else {
-            //Report error only if we need some parameters
-            if !method.variables.is_empty() {
-                return Err(ErrorCodeData::Without(ErrorCode::InvalidParams));
-            }
             BTreeMap::new()
         };
 
         //prepare arguments
-        let mut arguments = Vec::new();
+        let mut arguments = Vec::<String>::new();
         for arg in &method.exec_params {
-            let mut arg = arg.clone();
-            info!("Argument before evaluation {}", arg);
-            for (key,value) in &method.variables {
-                info!("Evaluation: {}", key);
-                match *value {
-                    Variable::Named(ref name) => {
-                        if let Some(value) = params.get(name) {
-                        arg = arg.replace(key, value.as_string().unwrap());
-                        } else {
-                            error!("Requested parameters {} not found!", key);
-                            return Err(ErrorCodeData::Without(ErrorCode::InvalidParams));
-                        }
-                    }
-                    _ => {}
-                };
-            }
-            info!("Argument after evaluation {}", arg);
-            arguments.push(arg);
+            arguments.push(unroll_variables(arg, &params).unwrap());
         }
+
+        info!("Method invoke with {:?}", arguments);
+
         if let Some(ref fake_response) = method.use_fake_response {
             //delayed response...
             info!("Delayed command execution. Faking response {}", fake_response);
             let path = method.path.clone();
+            let delay = method.delay * 1000;
             thread::spawn(move || {
-                thread::sleep_ms(2000);
+                thread::sleep_ms(delay);
                 info!("Executing delayed command");
                 match Command::new(&path).args(&arguments).output() {
                     Ok(o) => {
@@ -266,7 +279,6 @@ impl jsonrpc::Handler for RpcHandler {
                     },
                     Err(e) => info!("Failed to execute process: {}", e)
                 }
-                
             });
             return Ok(fake_response.clone());
         } else {
@@ -274,7 +286,7 @@ impl jsonrpc::Handler for RpcHandler {
                 .args(&arguments)
                 .output()
                 .map(|o|String::from_utf8_lossy(&o.stdout).to_json())
-                .map_err(|_| ErrorCodeData::Without(ErrorCode::InvalidParams));
+                .map_err(|_| ErrorJsonRpc::new(ErrorCode::InvalidParams));
             return output;
         }
     }
@@ -305,7 +317,7 @@ fn main() {
     set_log_level(config.log_level);
 
     if config.use_https {
-        let ssl = Openssl::with_cert_and_key(&config.cert.as_ref().unwrap(), 
+        let ssl = Openssl::with_cert_and_key(&config.cert.as_ref().unwrap(),
                                              &config.key.as_ref().unwrap()).unwrap();
         Server::https((&config.address as &str, config.port), ssl)
             .unwrap()

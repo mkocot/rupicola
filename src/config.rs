@@ -6,11 +6,13 @@ extern crate clap;
 extern crate yaml_rust;
 extern crate regex;
 
+use std::rc::Rc;
+use std::sync::Arc;
 use std::io::{Read};
 use rustc_serialize::json::{ToJson, Json};
 use yaml_rust::{YamlLoader, Yaml};
 use self::regex::Regex;
-use std::collections::{HashMap, BTreeSet};
+use std::collections::{HashMap, BTreeSet, BTreeMap};
 use std::str::FromStr;
 use std::fs::File;
 
@@ -41,18 +43,34 @@ pub struct MethodDefinition {
     pub name: String,
     pub path: String,
     //how parse request
-    pub exec_params: Vec<String>,
-    pub variables: HashMap<String, Variable>,
-    pub use_fake_response: Option<Json>
+    pub exec_params: Vec<FutureVar>,
+    pub variables: HashMap<String, ParameterDefinition>,
+    pub use_fake_response: Option<Json>,
+    /// Delayed execution in seconds
+    pub delay: u32
 }
 
-#[derive(Clone)]
-pub enum Variable {
-    Positional(i32),
-    //variable_name
-    Named(String)
+#[derive(Debug, Clone)]
+pub enum FutureVar {
+    //This is just constant string
+    Constant(String),
+    //This is ref to parameter definition
+    Variable(ParameterDefinition),
+    Chained(Box<Vec<FutureVar>>)
 }
 
+#[derive(Debug, Clone)]
+pub enum ParameterType {
+    String,
+    Number
+}
+
+#[derive(Debug, Clone)]
+pub struct ParameterDefinition {
+    pub name: String,
+    pub optional: bool,
+    pub param_type: ParameterType
+}
 
 impl ServerConfig {
     pub fn new () -> ServerConfig {
@@ -80,7 +98,7 @@ impl ServerConfig {
         f.read_to_string(&mut s).unwrap();
         let config = YamlLoader::load_from_str(&s).unwrap();
         let config_yaml = &config[0];
-        
+
         if let Some(protocol_definition) = config_yaml["protocol"].as_hash() {
             info!("Parsing protocol definition");
             if let Some(protocol_type) = protocol_definition[&Yaml::String("type".to_owned())].as_str() {
@@ -117,11 +135,11 @@ impl ServerConfig {
             }
         }
 
-        if let Some(methods) = config_yaml["methods"].as_vec() {
+        if let Some(methods) = config_yaml["methods"].as_hash() {
             parse_methods(methods, &mut server_config.methods);
         }
 
-        if let Some(streams) = config_yaml["streams"].as_vec() {
+        if let Some(streams) = config_yaml["streams"].as_hash() {
             parse_methods(streams, &mut server_config.streams);
         }
 
@@ -141,70 +159,136 @@ impl ServerConfig {
             };
         }
         server_config
-    }    
+    }
 }
 
-fn parse_methods(methods: &Vec<Yaml>, config_methods: &mut HashMap<String, MethodDefinition>) {
-    for method_def in methods {
-        //let method_def = &method_def_map["method"];
-        let name = method_def["method"].as_str().unwrap();
-        let _type = method_def["type"].as_str().unwrap();
-        let path = method_def["path"].as_str().unwrap();
+fn parse_methods(methods: &BTreeMap<Yaml, Yaml>, config_methods: &mut HashMap<String, MethodDefinition>) {
+    for (method_name, method_def) in methods {
+        //Name method MUST be string
+        let name = match method_name.as_str() {
+            Some(name) => name,
+            None => {warn!("Method name {:?} is invalid", method_name); continue;}
+        };
+        let invoke = &method_def["invoke"];
+        if invoke.as_hash() == None {
+            warn!("Method {}: Missing required parameter 'invoke'", name);
+            continue;
+        }
+        //The EXEC type method
+        let path = invoke["exec"].as_str().unwrap();
+        let delay = invoke["delay"].as_i64().and_then(|delay| if delay < 0 || delay > 30 { None } else {Some(delay)}).unwrap_or(10) as u32;
         let params = &method_def["params"];
-        let mut parameters = BTreeSet::<String>::new();
+        //contains all required and optional parameters
+        let mut parameters = HashMap::<String, ParameterDefinition>::new();
 
         if params.is_null() || params.is_badvalue() {
         } else {
             //get keys
             if let Some(mapa) = params.as_hash() {
-                for key in mapa.keys() {
-                    let key = key.as_str().unwrap();
-                    parameters.insert(key.to_owned());
+                for (name_it, definition_it) in mapa {
+                    //required
+                    let name = name_it.as_str().unwrap().to_owned();
+                    //optional
+                    let optional = definition_it["optional"].as_bool().unwrap_or(false);
+                    //hmm reguired..
+                    let param_type = match definition_it["type"].as_str().unwrap_or("") {
+                        "string" => ParameterType::String,
+                        "number" => ParameterType::Number,
+                        _ => ParameterType::String
+                    };
+                    let definition = ParameterDefinition {
+                        param_type: param_type,
+                        name: name.clone(),
+                        optional: optional
+                    };
+                    info!("Param: {:?}", name);
+                    parameters.insert(name, definition);
                 }
+            } else {
+                error!("Invalid value for field param");
             }
         }
 
-        let fake_response = if let Some(json) = method_def["fake_response"].as_str() {
+        //For now only string...
+        let fake_response = if let Some(json) = method_def["response"].as_str() {
             Some(json.to_json())
         } else {
             None
         };
 
-        let mut variables_map = HashMap::<String, Variable>::new();
-        let mut variables = Vec::<String>::new();
+        //let mut variables_map = HashMap::<String, Variable>::new();
+        let mut variables = Vec::<FutureVar>::new();
 
-        if let Some(exec_params) = method_def["exec_params"].as_vec() {
-            for exec_param in exec_params {
-                variables.push(exec_param.as_str().unwrap().to_owned());
-                //search for variables
-                let re = Regex::new(r"(\$[\w]+)").unwrap();
-                for variable in re.captures_iter(exec_param.as_str().unwrap()) {
-                    let variable_name = variable.at(1).unwrap();
-                    if !variables_map.contains_key(variable_name) {
-                        //is that a number?
-                        let var = if let Ok(number) = i32::from_str(&variable_name[1..]) {
-                            Variable::Positional(number)
-                        } else {
-                            if parameters.contains(&variable_name[1..].to_owned()) {
-                            Variable::Named(variable_name[1..].to_owned())
-                            } else {
-                                panic!("Unbound parameter {}", variable_name);
-                            }
-                        };
-                        variables_map.insert(variable_name.to_owned(), var);
+        let extract_param = |h: &Yaml| -> Option<FutureVar> {
+            //Only support if this is {param: name} case
+            match h["param"].as_str() {
+                Some(s) => {
+                    let param_ref = parameters.get(s);
+                    match param_ref {
+                        None => {
+                            error!("No binding for {:?}", s);
+                            None
+                        },
+                        Some(s) => {
+                            Some(FutureVar::Variable(s.clone()))
+                        }
                     }
+                },//todo: continue for outer loop
+                None => {
+                    error!("Expected {{param: name}}, but found {:?}", h["param"]);
+                    None
                 }
             }
-        } else {
+        };
+
+        if let Some(exec_params) = invoke["args"].as_vec() {
+            for exec_param in exec_params {
+                info!("Exec param: {:?}", exec_param);
+                if let Some(s) = exec_param.as_str() {
+                    info!("Vulgaris string");
+                    variables.push(FutureVar::Constant(s.to_owned()));
+                } else if let Some(v) = exec_param.as_vec() {
+                    info!("Ok this is complicated");
+                    //for now just assume this is non nested string array
+                    let mut ugly_solution = Vec::new();
+                    for element in v {
+                        match *element {
+                            Yaml::String(ref s) => ugly_solution.push(FutureVar::Constant(s.to_owned())),
+                            Yaml::Hash(ref h) => {
+                                match extract_param(element) {
+                                    Some(s) => ugly_solution.push(s),
+                                    None => error!("Expected {{param: name}}, but found {:?}", exec_param["param"])
+                                }
+                            },
+                            _ => error!("Unsupported element: {:?}", element)
+                        }
+                        info!("Element: {:?}", element);
+                    }
+                    variables.push(FutureVar::Chained(Box::new(ugly_solution)));
+                } else if let Some(m) = exec_param.as_hash() {
+                    //Only support if this is {param: name} case
+                    match extract_param(exec_param) {
+                        Some(s) => {
+                            variables.push(s);
+                        },//todo: continue for outer loop
+                        None => {error!("Expected {{param: name}}, but found {:?}", exec_param["param"]); continue;}
+                    }
+                } else {
+                    error!("Unsupported param type");
+                    continue;//should continue outer loop
+                }
+            }
         }
+
         let method_definition = MethodDefinition {
             name: name.to_owned(),
             path: path.to_owned(),
-            //this contains app invocation arguments, each argument in its own 
+            //this contains app invocation arguments, each argument in its own
             exec_params: variables,
             //this contains mapping from invocation input to method
-            variables: variables_map,
-            use_fake_response: fake_response
+            variables: parameters.clone(),
+            use_fake_response: fake_response,
+            delay: delay
         };
         config_methods.insert(method_definition.name.clone(), method_definition);
     }
