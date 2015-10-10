@@ -136,10 +136,14 @@ impl SenderHandler {
         //TODO: Limit read size
         req.read_to_string(&mut request_str).unwrap();
         info!("--> {}", request_str);
-        let request_docs = YamlLoader::load_from_str(&request_str).unwrap();
-        let request_params = &request_docs[0];
+        let request_json = Json::from_str(&request_str).unwrap();
+        
+        let params = match request_json["params"].as_object() {
+            Some(s) => s.to_owned(),
+            None => BTreeMap::new()
+        };
 
-        let method_name = if let Some(s) = request_params["method"].as_str() {
+        let method_name = if let Some(s) = request_json["method"].as_string() {
             s
         } else {
             *res.status_mut() = StatusCode::NotFound;
@@ -155,12 +159,10 @@ impl SenderHandler {
         let method = method.unwrap();
 
         //For now: No parameters parsing
-        let mut arguments = Vec::new();
+        //create method evaluating params based on parameters
+        let mut arguments = Vec::<String>::new();
         for arg in &method.exec_params {
-            match *arg {
-                FutureVar::Constant(ref s) => arguments.push(s),
-                _ => error!("Unsupported: {:?}", arg)
-            }
+            arguments.push(unroll_variables(arg, &params).unwrap());
         }
         info!("Spawn child for {} with args: {:?}", method_name, arguments);
 
