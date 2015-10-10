@@ -176,37 +176,37 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>, config_methods: &mut HashMap<St
         }
         //The EXEC type method
         let path = invoke["exec"].as_str().unwrap();
-        let delay = invoke["delay"].as_i64().and_then(|delay| if delay < 0 || delay > 30 { None } else {Some(delay)}).unwrap_or(10) as u32;
+        let delay = invoke["delay"].as_i64()
+            .and_then(|delay| if delay < 0 || delay > 30 { None } else {Some(delay)})
+            .unwrap_or(10) as u32;
         let params = &method_def["params"];
         //contains all required and optional parameters
         let mut parameters = HashMap::<String, ParameterDefinition>::new();
-
-        if params.is_null() || params.is_badvalue() {
-        } else {
-            //get keys
-            if let Some(mapa) = params.as_hash() {
-                for (name_it, definition_it) in mapa {
-                    //required
-                    let name = name_it.as_str().unwrap().to_owned();
-                    //optional
-                    let optional = definition_it["optional"].as_bool().unwrap_or(false);
-                    //hmm reguired..
-                    let param_type = match definition_it["type"].as_str().unwrap_or("") {
-                        "string" => ParameterType::String,
-                        "number" => ParameterType::Number,
-                        _ => ParameterType::String
-                    };
-                    let definition = ParameterDefinition {
-                        param_type: param_type,
-                        name: name.clone(),
-                        optional: optional
-                    };
-                    info!("Param: {:?}", name);
-                    parameters.insert(name, definition);
-                }
-            } else {
-                error!("Invalid value for field param");
+        if let Some(mapa) = params.as_hash() {
+            for (name_it, definition_it) in mapa {
+                //required
+                let name = name_it.as_str().unwrap().to_owned();
+                //optional
+                let optional = definition_it["optional"].as_bool().unwrap_or(false);
+                //hmm reguired..
+                let param_type = match definition_it["type"].as_str().unwrap_or("") {
+                    "string" => ParameterType::String,
+                    "number" => ParameterType::Number,
+                    _ => {
+                        error!("No parameter type or invalid value for {:?}", name);
+                        continue;
+                    }
+                };
+                let definition = ParameterDefinition {
+                    param_type: param_type,
+                    name: name.clone(),
+                    optional: optional
+                };
+                info!("Param: {:?}", name);
+                parameters.insert(name, definition);
             }
+        } else {
+            error!("Invalid value for field param");
         }
 
         //For now only string...
@@ -219,7 +219,7 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>, config_methods: &mut HashMap<St
         //let mut variables_map = HashMap::<String, Variable>::new();
         let mut variables = Vec::<FutureVar>::new();
 
-        let extract_param = |h: &Yaml| -> Option<FutureVar> {
+        fn extract_param (h: &Yaml, parameters: &HashMap<String, ParameterDefinition>) -> Option<FutureVar> {
             //Only support if this is {param: name} case
             match h["param"].as_str() {
                 Some(s) => {
@@ -241,42 +241,54 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>, config_methods: &mut HashMap<St
             }
         };
 
+        fn parse_param(exec_param: &Yaml, parameters: &HashMap<String, ParameterDefinition>) -> Result<FutureVar, ()> {
+            //this should make FLAT structure in future
+            info!("Exec param: {:?}", exec_param);
+            if let Some(s) = exec_param.as_str() {
+                info!("Vulgaris string");
+                return Ok(FutureVar::Constant(s.to_owned()));
+            } else if let Some(v) = exec_param.as_vec() {
+                info!("Ok this is complicated");
+                //for now just assume this is non nested string array
+                let mut ugly_solution = Vec::new();
+                for element in v {
+                    match *element {
+                        Yaml::String(ref s) => ugly_solution.push(FutureVar::Constant(s.to_owned())),
+                        Yaml::Hash(_) => {
+                            match extract_param(element, parameters) {
+                                Some(s) => ugly_solution.push(s),
+                                None => error!("Expected {{param: name}}, but found {:?}", exec_param["param"])
+                            }
+                        },
+                        Yaml::Array(ref v) => {
+                            //In case of vector we just grab it and pass down
+                            ugly_solution.push(parse_param(element, parameters).unwrap());
+                        }
+                        _ => error!("Unsupported element: {:?}", element)
+                    }
+                    info!("Element: {:?}", element);
+                }
+                return Ok(FutureVar::Chained(Box::new(ugly_solution)));
+            } else if let Some(m) = exec_param.as_hash() {
+                //Only support if this is {param: name} case
+                match extract_param(exec_param, parameters) {
+                    Some(s) => {
+                        return Ok(s)
+                    },//todo: continue for outer loop
+                    None => {
+                        error!("Expected {{param: name}}, but found {:?}", exec_param["param"]);
+                        return Err(());
+                    }
+                }
+            } else {
+                error!("Unsupported param type");
+                return Err(());
+            }
+        }
+
         if let Some(exec_params) = invoke["args"].as_vec() {
             for exec_param in exec_params {
-                info!("Exec param: {:?}", exec_param);
-                if let Some(s) = exec_param.as_str() {
-                    info!("Vulgaris string");
-                    variables.push(FutureVar::Constant(s.to_owned()));
-                } else if let Some(v) = exec_param.as_vec() {
-                    info!("Ok this is complicated");
-                    //for now just assume this is non nested string array
-                    let mut ugly_solution = Vec::new();
-                    for element in v {
-                        match *element {
-                            Yaml::String(ref s) => ugly_solution.push(FutureVar::Constant(s.to_owned())),
-                            Yaml::Hash(ref h) => {
-                                match extract_param(element) {
-                                    Some(s) => ugly_solution.push(s),
-                                    None => error!("Expected {{param: name}}, but found {:?}", exec_param["param"])
-                                }
-                            },
-                            _ => error!("Unsupported element: {:?}", element)
-                        }
-                        info!("Element: {:?}", element);
-                    }
-                    variables.push(FutureVar::Chained(Box::new(ugly_solution)));
-                } else if let Some(m) = exec_param.as_hash() {
-                    //Only support if this is {param: name} case
-                    match extract_param(exec_param) {
-                        Some(s) => {
-                            variables.push(s);
-                        },//todo: continue for outer loop
-                        None => {error!("Expected {{param: name}}, but found {:?}", exec_param["param"]); continue;}
-                    }
-                } else {
-                    error!("Unsupported param type");
-                    continue;//should continue outer loop
-                }
+                variables.push(parse_param(exec_param, &parameters).unwrap());
             }
         }
 
@@ -286,7 +298,7 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>, config_methods: &mut HashMap<St
             //this contains app invocation arguments, each argument in its own
             exec_params: variables,
             //this contains mapping from invocation input to method
-            variables: parameters.clone(),
+            variables: parameters,
             use_fake_response: fake_response,
             delay: delay
         };
