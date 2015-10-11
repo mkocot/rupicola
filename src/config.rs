@@ -45,7 +45,7 @@ pub struct MethodDefinition {
     pub path: String,
     //how parse request
     pub exec_params: Vec<FutureVar>,
-    pub variables: HashMap<String, ParameterDefinition>,
+    pub variables: HashMap<String, Arc<ParameterDefinition>>,
     pub use_fake_response: Option<Json>,
     /// Delayed execution in seconds
     pub delay: u32
@@ -56,7 +56,7 @@ pub enum FutureVar {
     //This is just constant string
     Constant(String),
     //This is ref to parameter definition
-    Variable(ParameterDefinition),
+    Variable(Arc<ParameterDefinition>),
     Chained(Vec<FutureVar>)
 }
 
@@ -172,7 +172,7 @@ impl ServerConfig {
     }
 }
 
-fn extract_param (h: &Yaml, parameters: &HashMap<String, ParameterDefinition>) -> Option<FutureVar> {
+fn extract_param (h: &Yaml, parameters: &HashMap<String, Arc<ParameterDefinition>>) -> Option<FutureVar> {
     //Only support if this is {param: name} case
     match h["param"].as_str() {
         Some(s) => {
@@ -194,11 +194,11 @@ fn extract_param (h: &Yaml, parameters: &HashMap<String, ParameterDefinition>) -
     }
 }
 
-fn parse_param(exec_param: &Yaml, parameters: &HashMap<String, ParameterDefinition>) -> Result<FutureVar, ()> {
+fn parse_param(exec_param: &Yaml, parameters: &HashMap<String, Arc<ParameterDefinition>>) -> Result<FutureVar, ()> {
     //this should make FLAT structure in future
     info!("Exec param: {:?}", exec_param);
 
-    fn extract_simple(exec_param: &Yaml, parameters: &HashMap<String, ParameterDefinition>) -> Result<FutureVar, ()> {
+    fn extract_simple(exec_param: &Yaml, parameters: &HashMap<String, Arc<ParameterDefinition>>) -> Result<FutureVar, ()> {
         //Bind all simple types
         if let Some(c) = match *exec_param {
             Yaml::Real(ref s) | Yaml::String(ref s) => Some(s.to_owned()),
@@ -314,7 +314,7 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>, config_methods: &mut HashMap<St
             .unwrap_or(10) as u32;
         let params = &method_def["params"];
         //contains all required and optional parameters
-        let mut parameters = HashMap::<String, ParameterDefinition>::new();
+        let mut parameters = HashMap::new();
         if let Some(mapa) = params.as_hash() {
             for (name_it, definition_it) in mapa {
                 //required
@@ -336,7 +336,7 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>, config_methods: &mut HashMap<St
                     optional: optional
                 };
                 info!("Param: {:?}", name);
-                parameters.insert(name, definition);
+                parameters.insert(name, Arc::new(definition));
             }
         } else {
             error!("Invalid value for field param");
