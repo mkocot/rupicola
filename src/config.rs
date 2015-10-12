@@ -7,14 +7,11 @@ extern crate yaml_rust;
 extern crate regex;
 
 use std::collections::VecDeque;
-use std::rc::Rc;
 use std::sync::Arc;
 use std::io::{Read};
 use rustc_serialize::json::{ToJson, Json};
 use yaml_rust::{YamlLoader, Yaml};
-use self::regex::Regex;
-use std::collections::{HashMap, BTreeSet, BTreeMap};
-use std::str::FromStr;
+use std::collections::{HashMap, BTreeMap};
 use std::fs::File;
 
 pub enum AuthMethod {
@@ -169,28 +166,6 @@ impl ServerConfig {
             };
         }
         server_config
-    }
-}
-
-fn extract_param (h: &Yaml, parameters: &HashMap<String, Arc<ParameterDefinition>>) -> Option<FutureVar> {
-    //Only support if this is {param: name} case
-    match h["param"].as_str() {
-        Some(s) => {
-            let param_ref = parameters.get(s);
-            match param_ref {
-                None => {
-                    error!("No binding for {:?}", s);
-                    None
-                },
-                Some(s) => {
-                    Some(FutureVar::Variable(s.clone()))
-                }
-            }
-        },//todo: continue for outer loop
-        None => {
-            error!("Expected {{param: name}}, but found {:?}", h["param"]);
-            None
-        }
     }
 }
 

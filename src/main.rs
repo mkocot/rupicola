@@ -25,12 +25,11 @@ use std::thread;
 use std::io::{Read, BufReader, BufRead, Write};
 use std::process::{Command, Stdio};
 use std::collections::{BTreeMap, HashMap};
-use yaml_rust::YamlLoader;
 
 struct SimpleLogger;
 struct SenderHandler {
     //unique client request tracing?
-    request_id: u32,
+    //request_id: u32,
     json_rpc: JsonRpcServer<RpcHandler>,
     config: ServerConfig
 }
@@ -97,7 +96,6 @@ impl SenderHandler {
         let json_handler = RpcHandler::new(conf.methods.clone());
 
         SenderHandler {
-            request_id: 0,
             json_rpc: JsonRpcServer::new_handler(json_handler),
             config: conf
         }
@@ -128,6 +126,7 @@ impl SenderHandler {
             AuthMethod::None => true,
         }
     }
+    
 
     fn handle_streaming(&self, mut req: Request, mut res: Response) {
         //Read streaming method name from path
@@ -158,12 +157,14 @@ impl SenderHandler {
         }
         let method = method.unwrap();
 
-        //For now: No parameters parsing
-        //create method evaluating params based on parameters
-        let mut arguments = Vec::<String>::new();
-        for arg in &method.exec_params {
-            arguments.push(unroll_variables(arg, &params).unwrap());
+        let arguments = get_invoke_arguments(&method.exec_params, &params);
+        if arguments.is_err() {
+            //In case of error terminate right away
+            *res.status_mut() = StatusCode::BadRequest;
+            return;
         }
+        //It's ok to unwrap here
+        let arguments = arguments.unwrap();
         info!("Spawn child for {} with args: {:?}", method_name, arguments);
 
         //Spawn child object
@@ -180,7 +181,7 @@ impl SenderHandler {
         for line in reader.split(b'\n') {
             let line = line.unwrap();
             //Ignore all non utf8 characters (well this is log anyway)
-            info!("<-- {}", String::from_utf8_lossy(&line));
+            debug!("<-- {}", String::from_utf8_lossy(&line));
             //Respond to client with content "as-is"
             streaming_response.write(&line).unwrap();
             streaming_response.write(b"\n").unwrap();
@@ -210,29 +211,57 @@ impl SenderHandler {
     }
 }
 
-fn unroll_variables(future: &FutureVar, params: &BTreeMap<String, Json>) -> Result<String,()> {
-//NOTE: Deep check should be done on config parse level
+fn get_invoke_arguments(exec_params: &Vec<FutureVar>,
+                        params: &BTreeMap<String, Json>) -> Result<Vec<String>, ()> {
+        let mut arguments = Vec::new();
+        for arg in exec_params {
+            match unroll_variables(arg, &params) {
+                Ok(Some(s)) => arguments.push(s),
+                Err(_) => return Err(()),
+                //We dont care about Ok(None)
+                _ => {}
+            }
+        }
+        Ok(arguments)
+}
+
+fn unroll_variables(future: &FutureVar,
+                    params: &BTreeMap<String, Json>) -> Result<Option<String>,()> {
     match *future {
-        FutureVar::Constant(ref s) => Ok(s.clone()),
+        FutureVar::Constant(ref s) => Ok(Some(s.clone())),
         FutureVar::Variable(ref v) => {
             //get info from params
             info!("Variable: {:?}", v);
             match params.get(&v.name) {
-                Some(s) => Ok(s.as_string().unwrap().to_owned()),
+                Some(s) => Ok(Some(s.as_string().unwrap().to_owned())),
                 None if !v.optional => {
                     error!("Missing required param {:?}", v.name);
                     return Err(());
                 }
                 //Meh
-                _ => {Ok("".to_owned())}
+                _ => {Ok(None)}
             }
         }
         FutureVar::Chained(ref c) => {
             let mut result = String::new();
+            let mut all_ok = true;
+
             for e in c.iter() {
-                result.push_str(&unroll_variables(e, params).unwrap());
+                match unroll_variables(e, params).unwrap() {
+                    Some(ref s) => result.push_str(s),
+                    None => {
+                        warn!("Optional variable {:?} is missing. Skip whole chain", e);
+                        all_ok = false;
+                        break;
+                    }
+                }
             }
-            Ok(result)
+
+            if all_ok {
+                Ok(Some(result))
+            } else {
+                Ok(None)
+            }
         }
     }
 }
@@ -255,10 +284,14 @@ impl jsonrpc::Handler for RpcHandler {
         };
 
         //prepare arguments
-        let mut arguments = Vec::<String>::new();
-        for arg in &method.exec_params {
-            arguments.push(unroll_variables(arg, &params).unwrap());
+        let arguments = get_invoke_arguments(&method.exec_params, &params);
+        if arguments.is_err() {
+            error!("Invalid params for request");
+            return Err(ErrorJsonRpc::new(ErrorCode::InvalidParams));
         }
+
+        //perfectly safe to unwrap
+        let arguments = arguments.unwrap();
 
         info!("Method invoke with {:?}", arguments);
 
@@ -269,7 +302,7 @@ impl jsonrpc::Handler for RpcHandler {
             let delay = method.delay * 1000;
             thread::spawn(move || {
                 thread::sleep_ms(delay);
-                info!("Executing delayed command");
+                info!("Executing delayed ({}ms) command", delay);
                 match Command::new(&path).args(&arguments).output() {
                     Ok(o) => {
                         //Log as lossy utf8.
@@ -308,7 +341,7 @@ fn set_log_level(level: log::LogLevelFilter) {
  * Main entry point
  * */
 fn main() {
-    //set default sane log level
+    //set default sane log level (we should set it to max? or max only in debug)
     set_log_level(log::LogLevelFilter::Info);
 
     let yml = load_yaml!("app.yml");
@@ -316,9 +349,11 @@ fn main() {
 
     let config_file = m.value_of("config").unwrap();
     let config = ServerConfig::read_from_file(config_file);
-    set_log_level(config.log_level);
+    //set_log_level(config.log_level);
 
     if config.use_https {
+        //TODO: Manual create context
+        //      default values use vulnerable SSLv2, SSLv3
         let ssl = Openssl::with_cert_and_key(&config.cert.as_ref().unwrap(),
                                              &config.key.as_ref().unwrap()).unwrap();
         Server::https((&config.address as &str, config.port), ssl)
