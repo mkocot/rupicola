@@ -102,7 +102,7 @@ impl SenderHandler {
     }
 
     fn is_request_authorized(&self, req: &Request) -> bool {
-        match self.config.auth {
+        match self.config.protocol_definition.auth {
             AuthMethod::Basic { ref login, ref pass } => {
                 info!("Using basic auth");
                 //check if user provided required credentials
@@ -137,10 +137,12 @@ impl SenderHandler {
         info!("--> {}", request_str);
         let request_json = Json::from_str(&request_str).unwrap();
         
-        let params = match request_json["params"].as_object() {
-            Some(s) => s.to_owned(),
-            None => BTreeMap::new()
-        };
+        //Not only btrre map...
+        //let params = match request_json["params"] {
+        //    Some(s) => s.to_owned(),
+        //    None => Json::Null
+        //};
+        let params = &request_json["params"];
 
         let method_name = if let Some(s) = request_json["method"].as_string() {
             s
@@ -212,7 +214,7 @@ impl SenderHandler {
 }
 
 fn get_invoke_arguments(exec_params: &Vec<FutureVar>,
-                        params: &BTreeMap<String, Json>) -> Result<Vec<String>, ()> {
+                        params: &Json) -> Result<Vec<String>, ()> {
         let mut arguments = Vec::new();
         for arg in exec_params {
             match unroll_variables(arg, &params) {
@@ -226,20 +228,47 @@ fn get_invoke_arguments(exec_params: &Vec<FutureVar>,
 }
 
 fn unroll_variables(future: &FutureVar,
-                    params: &BTreeMap<String, Json>) -> Result<Option<String>,()> {
+                    params: &Json) -> Result<Option<String>,()> {
+
     match *future {
         FutureVar::Constant(ref s) => Ok(Some(s.clone())),
+        FutureVar::Everything => {
+            let json = params.to_json().to_string();
+            if json.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some(json))
+            }
+        }
         FutureVar::Variable(ref v) => {
             //get info from params
-            info!("Variable: {:?}", v);
-            match params.get(&v.name) {
-                Some(s) => Ok(Some(s.as_string().unwrap().to_owned())),
-                None if !v.optional => {
-                    error!("Missing required param {:?}", v.name);
-                    return Err(());
-                }
+            // for now variables support only objects
+            match params.find(&v.name as &str) {
+                Some(&Json::String(ref s)) if v.param_type == ParameterType::String => {
+                    Ok(Some(s.to_owned()))
+                },
+                Some(&Json::I64(ref i)) if v.param_type == ParameterType::Number => {
+                    Ok(Some(i.to_string()))
+                },
+                Some(&Json::U64(ref i)) if v.param_type == ParameterType::Number => {
+                    Ok(Some(i.to_string()))
+                },
+                Some(&Json::F64(ref s)) if v.param_type == ParameterType::Number => {
+                    Ok(Some(s.to_string()))
+                },
                 //Meh
-                _ => {Ok(None)}
+                Some(ref s) => {
+                    error!("Unable to convert. Value = {:?}; target type = {:?}", s, v);
+                    Err(())
+                },
+                None => {
+                    if v.optional {
+                        Ok(None)
+                    } else {
+                        error!("Missing required param {:?}", v.name);
+                        Err(())
+                    }
+                },
             }
         }
         FutureVar::Chained(ref c) => {
@@ -277,12 +306,13 @@ impl jsonrpc::Handler for RpcHandler {
         let method = method.unwrap();
 
         //TODO: For now hackish solution
+        //Allow not only objects but also arrays
         let params = if let Some(ref p) = req.params {
-            p.as_object().unwrap().to_owned()
+            p.to_owned()
+            //p.as_object().unwrap().to_owned()
         } else {
-            BTreeMap::new()
+            Json::Null
         };
-
         //prepare arguments
         let arguments = get_invoke_arguments(&method.exec_params, &params);
         if arguments.is_err() {
@@ -337,6 +367,7 @@ fn set_log_level(level: log::LogLevelFilter) {
 
 }
 
+
 /**
  * Main entry point
  * */
@@ -350,20 +381,21 @@ fn main() {
     let config_file = m.value_of("config").unwrap();
     let config = ServerConfig::read_from_file(config_file);
     //set_log_level(config.log_level);
-
-    if config.use_https {
+    match config.protocol_definition.protocol.clone() {
+        Protocol::Https { ref address, ref port, ref cert, ref key } => {
         //TODO: Manual create context
         //      default values use vulnerable SSLv2, SSLv3
-        let ssl = Openssl::with_cert_and_key(&config.cert.as_ref().unwrap(),
-                                             &config.key.as_ref().unwrap()).unwrap();
-        Server::https((&config.address as &str, config.port), ssl)
+        let ssl = Openssl::with_cert_and_key(cert, key).unwrap();
+        Server::https((address as &str, *port), ssl)
             .unwrap()
             .handle(SenderHandler::new(config))
             .unwrap();
-    } else {
-        Server::http((&config.address as &str, config.port))
+        },
+        Protocol::Http { ref address, ref port } => {
+        Server::http((address as &str, *port))
             .unwrap()
             .handle(SenderHandler::new(config))
             .unwrap();
+        }
     }
 }

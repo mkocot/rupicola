@@ -19,21 +19,31 @@ pub enum AuthMethod {
     Basic { login: String, pass: String }
 }
 
-pub enum MethodType {
-    Dll,
-    Exec
+#[derive(Clone)]
+pub enum Protocol {
+    Http {
+        address: String,
+        port: u16
+    },
+
+    Https {
+        address: String,
+        port: u16,
+        cert: String,
+        key: String
+    }
+}
+
+pub struct ProtocolDefinition {
+    pub protocol: Protocol,
+    pub auth: AuthMethod
 }
 
 pub struct ServerConfig {
-    pub use_https: bool,
-    pub address: String,
-    pub port: u16,
-    pub cert: Option<String>,
-    pub key: Option<String>,
+    pub protocol_definition: ProtocolDefinition,
     pub methods: HashMap<String, MethodDefinition>,
     pub streams: HashMap<String, MethodDefinition>,
     pub log_level: log::LogLevelFilter,
-    pub auth: AuthMethod,
 }
 
 #[derive(Clone)]
@@ -48,13 +58,21 @@ pub struct MethodDefinition {
     pub delay: u32
 }
 
+//#[derive(Clone)]
+//pub enum MethodType {
+//    Exec {
+//    }
+//}
+
 #[derive(Debug, Clone)]
 pub enum FutureVar {
     //This is just constant string
     Constant(String),
     //This is ref to parameter definition
     Variable(Arc<ParameterDefinition>),
-    Chained(Vec<FutureVar>)
+    Chained(Vec<FutureVar>),
+    //Capture all params as one-line json string
+    Everything
 }
 
 impl FutureVar {
@@ -66,7 +84,7 @@ impl FutureVar {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum ParameterType {
     String,
     Number
@@ -80,18 +98,104 @@ pub struct ParameterDefinition {
 }
 
 impl ServerConfig {
+    //TODO: remove this
     pub fn new () -> ServerConfig {
         ServerConfig {
-            use_https: false,
-            address: "127.0.0.1".to_owned(),
-            port: 1337,
-            cert: None,
-            key: None,
+            protocol_definition: ProtocolDefinition { protocol: Protocol::Http {
+                address: "127.0.0.1".to_owned(),
+                port: 1337
+            },
+            auth: AuthMethod::None
+            },
             methods: HashMap::new(),
             streams: HashMap::new(),
             log_level: log::LogLevelFilter::Info,
-            auth: AuthMethod::None
         }
+    }
+
+    pub fn parse_protocol_definition(config: &Yaml) -> Result<ProtocolDefinition, ()> {
+        let protocol_definition = &config["protocol"];
+        let auth;
+        let protocol;
+        if config["protocol"].as_hash().is_some() {
+            info!("Parsing protocol definition");
+            if let Some(protocol_type) = protocol_definition["type"].as_str() {
+                let address = if let Some(addr) = protocol_definition["address"].as_str() {
+                    info!("Address: {}", addr);
+                    addr.to_owned()
+                } else {
+                    warn!("No bindpoint! Using 127.0.0.1");
+                    "127.0.0.1".to_owned()
+                };
+
+                let port = if let Some(port) = protocol_definition["port"].as_i64() {
+                    info!("Port: {}", port);
+                    port as u16
+                } else {
+                    error!("No port! Using 1337");
+                    1337
+                };
+
+                info!("Protocol type: {}", protocol_type);
+                let cert = protocol_definition["cert"].as_str().map(|o|o.to_owned());
+                let key = protocol_definition["key"].as_str().map(|o|o.to_owned());
+                if protocol_type == "https" && (cert.is_none() || key.is_none()) {
+                    if cert.is_none() || key.is_none() {
+                        error!("Requested https but not provided private key and certificate!");
+                        return Err(());
+                    } else {
+                        protocol = Protocol::Https {
+                            address: address,
+                            port: port,
+                            key: key.unwrap(),
+                            cert: cert.unwrap()
+                        };
+                    }
+                } else {
+                    protocol = Protocol::Http {
+                        address: address,
+                        port: port
+                    };
+                }
+            } else {
+                error!("No protocol type! Using HTTP");
+                return Err(());
+            }
+            //we want basic auth?
+            let basic_auth_config = &protocol_definition["auth-basic"];
+            auth = if !basic_auth_config.is_badvalue() {
+                //Ok we get non empty node check if we have all required fields
+                match (&basic_auth_config["login"], &basic_auth_config["password"]) {
+                    (&Yaml::String(ref login), &Yaml::String(ref password)) => {
+                        info!("Using basic auth");
+                        AuthMethod::Basic { login: login.to_owned(), pass: password.to_owned() }
+                    },
+                    (&Yaml::String(_), _)  => {
+                        error!("basic-auth: login field required");
+                        return Err(());
+                    },
+                    (_, &Yaml::String(_)) => {
+                        error!("basic-auth: password field required");
+                        return Err(());
+                    },
+                    _ => {
+                        error!("Invalid basic-auth definition!");
+                        return Err(());
+                    }
+                }
+            } else {
+                warn!("Server is free4all. Consider using some kind of auth");
+                AuthMethod::None
+            }
+        } else {
+            error!("No protocol field!");
+            return Err(());
+        };
+
+        Ok(ProtocolDefinition {
+            protocol: protocol,
+            auth: auth
+        })
     }
 
     pub fn read_from_file(config_file: &str) -> ServerConfig {
@@ -105,43 +209,7 @@ impl ServerConfig {
         f.read_to_string(&mut s).unwrap();
         let config = YamlLoader::load_from_str(&s).unwrap();
         let config_yaml = &config[0];
-
-        if let Some(protocol_definition) = config_yaml["protocol"].as_hash() {
-            info!("Parsing protocol definition");
-            if let Some(protocol_type) = protocol_definition[&Yaml::String("type".to_owned())].as_str() {
-                info!("Protocol type: {}", protocol_type);
-                if protocol_type == "https" {
-                    server_config.cert = config_yaml["protocol"]["cert"].as_str().map(|o|o.to_owned());
-                    server_config.key = config_yaml["protocol"]["key"].as_str().map(|o|o.to_owned());
-                    server_config.use_https = true;
-                }
-            }
-            if let Some(address) = protocol_definition[&Yaml::String("address".to_owned())].as_str() {
-                info!("Address: {}", address);
-                server_config.address = address.to_owned();
-            }
-            if let Some(port) = protocol_definition[&Yaml::String("port".to_owned())].as_i64() {
-                info!("Port: {}", port);
-                server_config.port = port as u16;
-            }
-            //we want basic auth?
-            let basic_auth_config = &config_yaml["protocol"]["auth-basic"];
-            if !basic_auth_config.is_badvalue() {
-                //Ok we get non empty node check if we have all required fields
-                match (&basic_auth_config["login"], &basic_auth_config["password"]) {
-                    (&Yaml::String(ref login), &Yaml::String(ref password)) => {
-                        info!("Using basic auth");
-                        server_config.auth = AuthMethod::Basic { login: login.to_owned(), pass: password.to_owned() }
-                    },
-                    (&Yaml::String(_), _)  => warn!("basic-auth: login field required"),
-                    (_, &Yaml::String(_)) => warn!("basic-auth: password field required"),
-                    _ => warn!("Invalid basic-auth definition!")
-                }
-            } else {
-                warn!("Server is free4all. Consider using some kind of auth");
-            }
-        }
-
+        server_config.protocol_definition = Self::parse_protocol_definition(config_yaml).unwrap();
         if let Some(methods) = config_yaml["methods"].as_hash() {
             parse_methods(methods, &mut server_config.methods);
         }
@@ -193,8 +261,14 @@ fn parse_param(exec_param: &Yaml, parameters: &HashMap<String, Arc<ParameterDefi
             .map(|s|FutureVar::Variable(s.clone())) {
                 Ok(s) => return Ok(s),
                 Err(e) => {
+                    //we need to check if this is case of self
+                    match exec_param["param"].as_str() {
+                        Some("self")=> return Ok(FutureVar::Everything),
+                        _=> {
                     error!("Error: processing {:?} - {}", exec_param["param"], e);
                     return Err(());
+                        }
+                    }
                 }
             }
         }
@@ -287,6 +361,7 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>, config_methods: &mut HashMap<St
         let delay = invoke["delay"].as_i64()
             .and_then(|delay| if delay < 0 || delay > 30 { None } else {Some(delay)})
             .unwrap_or(10) as u32;
+        
         let params = &method_def["params"];
         //contains all required and optional parameters
         let mut parameters = HashMap::new();
@@ -294,6 +369,10 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>, config_methods: &mut HashMap<St
             for (name_it, definition_it) in mapa {
                 //required
                 let name = name_it.as_str().unwrap().to_owned();
+                if name == "self" {
+                    error!("Used restricted keyword 'self'. Ignoring.");
+                    continue;
+                }
                 //optional
                 let optional = definition_it["optional"].as_bool().unwrap_or(false);
                 //hmm reguired..
@@ -317,14 +396,6 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>, config_methods: &mut HashMap<St
             error!("Invalid value for field param");
         }
 
-        //For now only string...
-        let fake_response = if let Some(json) = method_def["response"].as_str() {
-            Some(json.to_json())
-        } else {
-            None
-        };
-
-        //let mut variables_map = HashMap::<String, Variable>::new();
         let mut variables = Vec::<FutureVar>::new();
 
         if let Some(exec_params) = invoke["args"].as_vec() {
@@ -332,6 +403,13 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>, config_methods: &mut HashMap<St
                 variables.push(parse_param(exec_param, &parameters).unwrap());
             }
         }
+        //For now only string...
+        let fake_response = if let Some(json) = method_def["response"].as_str() {
+            Some(json.to_json())
+        } else {
+            None
+        };
+
 
         let method_definition = MethodDefinition {
             name: name.to_owned(),

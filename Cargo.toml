@@ -14,6 +14,7 @@ log = "0.3.2"
 yaml-rust = "0.2.2"
 regex = "0.1.41"
 
+# https://bitbucket.org/kociolek/jsonrpc/
 [dependencies.jsonrpc]
 path = "jsonrpc"
 
