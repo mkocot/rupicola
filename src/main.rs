@@ -24,7 +24,7 @@ use rustc_serialize::json::{ToJson, Json};
 use std::thread;
 use std::io::{Read, BufReader, BufRead, Write};
 use std::process::{Command, Stdio};
-use std::collections::{BTreeMap, HashMap};
+use std::collections::HashMap;
 
 struct SimpleLogger;
 struct SenderHandler {
@@ -110,8 +110,7 @@ impl SenderHandler {
                 if let Some(ref auth) = auth_heder {
                     //ok
                     let password = auth.password.clone().unwrap_or("".to_owned());
-                    if auth.username != *login
-                        || password != *pass {
+                    if auth.username != *login || password != *pass {
                         warn!("Invalid username or password");
                         false
                     } else {
@@ -126,22 +125,28 @@ impl SenderHandler {
             AuthMethod::None => true,
         }
     }
-    
+
 
     fn handle_streaming(&self, mut req: Request, mut res: Response) {
         //Read streaming method name from path
         // POST /streaming
         let mut request_str = String::new();
         //TODO: Limit read size
-        req.read_to_string(&mut request_str).unwrap();
+        if let Err(e) = req.read_to_string(&mut request_str) {
+            error!("Reading request failed {:?}", e);
+            *res.status_mut() = StatusCode::BadRequest;
+            return;
+        }
         info!("--> {}", request_str);
-        let request_json = Json::from_str(&request_str).unwrap();
-        
-        //Not only btrre map...
-        //let params = match request_json["params"] {
-        //    Some(s) => s.to_owned(),
-        //    None => Json::Null
-        //};
+        let request_json = match Json::from_str(&request_str) {
+            Ok(s) => s,
+            Err(e) => {
+                error!("Invalid JSON request: {:?}", e);
+                *res.status_mut() = StatusCode::BadRequest;
+                return;
+            }
+        };
+
         let params = &request_json["params"];
 
         let method_name = if let Some(s) = request_json["method"].as_string() {
@@ -151,47 +156,73 @@ impl SenderHandler {
             return;
         };
 
-        let method = self.config.streams.get(method_name);
-        if method.is_none() {
-            warn!("Requested method {} not found", method_name);
-            *res.status_mut() = StatusCode::NotFound;
-            return;
-        }
-        let method = method.unwrap();
+        let method = match self.config.streams.get(method_name) {
+            Some(s) => s,
+            None => {
+                warn!("Requested method {} not found", method_name);
+                *res.status_mut() = StatusCode::NotFound;
+                return;
+            }
+        };
 
-        let arguments = get_invoke_arguments(&method.exec_params, &params);
-        if arguments.is_err() {
-            //In case of error terminate right away
-            *res.status_mut() = StatusCode::BadRequest;
-            return;
-        }
-        //It's ok to unwrap here
-        let arguments = arguments.unwrap();
+        let arguments = match get_invoke_arguments(&method.exec_params, &params) {
+            Err(e) => {
+                error!("Error during retrieving arguments: {:?}", e);
+                //In case of error terminate right away
+                *res.status_mut() = StatusCode::BadRequest;
+                return;
+            },
+            Ok(a) => a
+        };
         info!("Spawn child for {} with args: {:?}", method_name, arguments);
+        let mut streaming_response = match res.start() {
+            Ok(o) => o,
+            Err(e) => {
+                error!("Unable to obtain response stream: {:?}", e);
+                return;
+            }
+        };
+        //todo: Detect when connection is killed and kill child process
+        if let Err(e) = Self::spawn_and_stream(method, &arguments, &mut streaming_response) {
+            error!("Processing streamer request failed: {:?}", e);
+        }
+        if let Err(e) = streaming_response.end() {
+            error!("Closing response stream failed: {:?}", e);
+            return;
+        }
+        info!("Reading STDOUT finished")
+    }
 
+    fn spawn_and_stream(method: &MethodDefinition,
+                        arguments: &[String],
+                        streaming_response:&mut Write) -> std::io::Result<()> {
         //Spawn child object
-        let child_process = Command::new(&method.path)
+        let mut child_process = try!(Command::new(&method.path)
             .args(&arguments)
             .stdout(Stdio::piped())
-            .spawn().unwrap();
+            .spawn());
 
         //Pipe stdout
-        let stdout_stream = child_process.stdout.unwrap();
-        let mut streaming_response = res.start().unwrap();
+        let stdout_stream = if let Some(s) = child_process.stdout {
+            s
+        } else {
+            warn!("Program closed without opening stdout. This is unexpected.");
+            try!(child_process.kill());
+            return Ok(());
+        };
+
         //Read as hytes chunks
         let reader = BufReader::new(stdout_stream);
         for line in reader.split(b'\n') {
-            let line = line.unwrap();
+            let line = try!(line);
             //Ignore all non utf8 characters (well this is log anyway)
             debug!("<-- {}", String::from_utf8_lossy(&line));
             //Respond to client with content "as-is"
-            streaming_response.write(&line).unwrap();
-            streaming_response.write(b"\n").unwrap();
-            streaming_response.flush().unwrap();
+            try!(streaming_response.write(&line));
+            try!(streaming_response.write(b"\n"));
+            try!(streaming_response.flush());
         }
-        info!("Reading STDOUT finished");
-        streaming_response.end().unwrap();
-        //todo: Detect when connection is killed and kill child process
+        Ok(())
     }
 
     fn handle_json_rpc(&self, mut req: Request, res: Response) {
@@ -199,16 +230,15 @@ impl SenderHandler {
         let mut request = String::new();
         if req.read_to_string(&mut request).is_err() {
             warn!("Unable to read request");
-            res.send(b"Bah!").unwrap();
             return;
         }
         info!("Request: {}", request);
         let response = self.json_rpc.handle_request(&request);
         if let Some(response) = response {
             info!("Response: {}", response);
-            res.send(&response.into_bytes()).unwrap();
-        } else {
-            info!("Just notification");
+            if let Err(e) = res.send(&response.into_bytes()) {
+                error!("Error during sending response: {:?}", e);
+            }
         }
     }
 }
@@ -276,14 +306,14 @@ fn unroll_variables(future: &FutureVar,
             let mut all_ok = true;
 
             for e in c.iter() {
-                match unroll_variables(e, params).unwrap() {
-                    Some(ref s) => result.push_str(s),
-                    None => {
+                match unroll_variables(e, params) {
+                    Ok(Some(ref o)) => result.push_str(o),
+                    Ok(None) | Err(_) =>  {
                         warn!("Optional variable {:?} is missing. Skip whole chain", e);
                         all_ok = false;
                         break;
                     }
-                }
+                };
             }
 
             if all_ok {
@@ -297,31 +327,26 @@ fn unroll_variables(future: &FutureVar,
 
 impl jsonrpc::Handler for RpcHandler {
     fn handle(&self, req: &JsonRpcRequest) -> Result<Json, ErrorJsonRpc> {
-        info!("Call from callback!");
-        let method = self.methods.get(&req.method);
-        if method.is_none() {
+
+        let method = if let Some(s) = self.methods.get(req.method) { s } else {
             error!("Requested method '{}' not found!", &req.method);
-            return Err(ErrorJsonRpc::new(ErrorCode::MethodNotFound))
-        }
-        let method = method.unwrap();
+            return Err(ErrorJsonRpc::new(ErrorCode::MethodNotFound));
+        };
 
         //TODO: For now hackish solution
         //Allow not only objects but also arrays
-        let params = if let Some(ref p) = req.params {
+        let params = if let Some(p) = req.params {
             p.to_owned()
-            //p.as_object().unwrap().to_owned()
         } else {
             Json::Null
         };
         //prepare arguments
-        let arguments = get_invoke_arguments(&method.exec_params, &params);
-        if arguments.is_err() {
+        let arguments = if let Ok(ok) = get_invoke_arguments(&method.exec_params, &params) {
+            ok
+        } else {
             error!("Invalid params for request");
             return Err(ErrorJsonRpc::new(ErrorCode::InvalidParams));
-        }
-
-        //perfectly safe to unwrap
-        let arguments = arguments.unwrap();
+        };
 
         info!("Method invoke with {:?}", arguments);
 
@@ -378,7 +403,7 @@ fn main() {
     let yml = load_yaml!("app.yml");
     let m = App::from_yaml(yml).get_matches();
 
-    let config_file = m.value_of("config").unwrap();
+    let config_file = m.value_of("config").unwrap_or("/etc/jsonrpcd/jsonrpcd.conf");
     let config = ServerConfig::read_from_file(config_file);
     //set_log_level(config.log_level);
     match config.protocol_definition.protocol.clone() {
