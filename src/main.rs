@@ -1,7 +1,7 @@
-//Local files/dependencies
+// Local files/dependencies
 mod config;
 
-//External dependencies
+// External dependencies
 #[macro_use]
 extern crate clap;
 extern crate hyper;
@@ -15,7 +15,7 @@ use clap::App;
 use config::*;
 use hyper::status::StatusCode;
 use hyper::server::{Server, Request, Response, Handler};
-use hyper::uri::{RequestUri};
+use hyper::uri::RequestUri;
 use hyper::net::Openssl;
 use hyper::header::{Authorization, Basic};
 use jsonrpc::{JsonRpcServer, JsonRpcRequest, ErrorCode, ErrorJsonRpc};
@@ -28,14 +28,14 @@ use std::collections::HashMap;
 
 struct SimpleLogger;
 struct SenderHandler {
-    //unique client request tracing?
-    //request_id: u32,
+    // unique client request tracing?
+    // request_id: u32,
     json_rpc: JsonRpcServer<RpcHandler>,
-    config: ServerConfig
+    config: ServerConfig,
 }
 
 struct RpcHandler {
-    methods: HashMap<String, MethodDefinition>
+    methods: HashMap<String, MethodDefinition>,
 }
 
 impl log::Log for SimpleLogger {
@@ -52,12 +52,14 @@ impl log::Log for SimpleLogger {
 
 impl Handler for SenderHandler {
     fn handle(&self, req: Request, mut res: Response) {
-        //Only support of POST
-        info!("Processing request from {}. Method {}. Uri {}", req.remote_addr,
-              req.method, req.uri);
+        // Only support of POST
+        info!("Processing request from {}. Method {}. Uri {}",
+              req.remote_addr,
+              req.method,
+              req.uri);
 
         if !self.is_request_authorized(&req) {
-            //TODO: is there build-in for this?
+            // TODO: is there build-in for this?
             res.headers_mut().set_raw("WWW-Authenticate", vec![b"Basic".to_vec()]);
             *res.status_mut() = StatusCode::Unauthorized;
             return;
@@ -85,20 +87,18 @@ impl Handler for SenderHandler {
 
 impl RpcHandler {
     pub fn new(methods: HashMap<String, MethodDefinition>) -> RpcHandler {
-        RpcHandler {
-            methods: methods
-        }
+        RpcHandler { methods: methods }
     }
 }
 
 impl SenderHandler {
     fn new(conf: ServerConfig) -> SenderHandler {
-        //Dont like it...
+        // Dont like it...
         let json_handler = RpcHandler::new(conf.methods.clone());
 
         SenderHandler {
             json_rpc: JsonRpcServer::new_handler(json_handler),
-            config: conf
+            config: conf,
         }
     }
 
@@ -106,10 +106,10 @@ impl SenderHandler {
         match self.config.protocol_definition.auth {
             AuthMethod::Basic { ref login, ref pass } => {
                 info!("Using basic auth");
-                //check if user provided required credentials
+                // check if user provided required credentials
                 let auth_heder = req.headers.get::<Authorization<Basic>>();
                 if let Some(ref auth) = auth_heder {
-                    //ok
+                    // ok
                     let password = auth.password.clone().unwrap_or("".to_owned());
                     if auth.username != *login || password != *pass {
                         warn!("Invalid username or password");
@@ -122,17 +122,17 @@ impl SenderHandler {
                     error!("Required basic auth and got none!");
                     false
                 }
-            },
+            }
             AuthMethod::None => true,
         }
     }
 
 
     fn handle_streaming(&self, mut req: Request, mut res: Response) {
-        //Read streaming method name from path
+        // Read streaming method name from path
         // POST /streaming
         let mut request_str = String::new();
-        //TODO: Limit read size
+        // TODO: Limit read size
         if let Err(e) = req.read_to_string(&mut request_str) {
             error!("Reading request failed {:?}", e);
             *res.status_mut() = StatusCode::BadRequest;
@@ -169,11 +169,11 @@ impl SenderHandler {
         let arguments = match get_invoke_arguments(&method.exec_params, &params) {
             Err(e) => {
                 error!("Error during retrieving arguments: {:?}", e);
-                //In case of error terminate right away
+                // In case of error terminate right away
                 *res.status_mut() = StatusCode::BadRequest;
                 return;
-            },
-            Ok(a) => a
+            }
+            Ok(a) => a,
         };
         info!("Spawn child for {} with args: {:?}", method_name, arguments);
         let mut streaming_response = match res.start() {
@@ -183,7 +183,7 @@ impl SenderHandler {
                 return;
             }
         };
-        //todo: Detect when connection is killed and kill child process
+        // todo: Detect when connection is killed and kill child process
         if let Err(e) = Self::spawn_and_stream(method, &arguments, &mut streaming_response) {
             error!("Processing streamer request failed: {:?}", e);
         }
@@ -196,14 +196,15 @@ impl SenderHandler {
 
     fn spawn_and_stream(method: &MethodDefinition,
                         arguments: &[String],
-                        streaming_response:&mut Write) -> std::io::Result<()> {
-        //Spawn child object
+                        streaming_response: &mut Write)
+                        -> std::io::Result<()> {
+        // Spawn child object
         let mut child_process = try!(Command::new(&method.path)
-            .args(&arguments)
-            .stdout(Stdio::piped())
-            .spawn());
+                                         .args(&arguments)
+                                         .stdout(Stdio::piped())
+                                         .spawn());
 
-        //Pipe stdout
+        // Pipe stdout
         let stdout_stream = if let Some(s) = child_process.stdout {
             s
         } else {
@@ -212,13 +213,13 @@ impl SenderHandler {
             return Ok(());
         };
 
-        //Read as hytes chunks
+        // Read as hytes chunks
         let reader = BufReader::new(stdout_stream);
         for line in reader.split(b'\n') {
             let line = try!(line);
-            //Ignore all non utf8 characters (well this is log anyway)
+            // Ignore all non utf8 characters (well this is log anyway)
             debug!("<-- {}", String::from_utf8_lossy(&line));
-            //Respond to client with content "as-is"
+            // Respond to client with content "as-is"
             try!(streaming_response.write(&line));
             try!(streaming_response.write(b"\n"));
             try!(streaming_response.flush());
@@ -227,7 +228,7 @@ impl SenderHandler {
     }
 
     fn handle_json_rpc(&self, mut req: Request, res: Response) {
-        //TODO: check required content type
+        // TODO: check required content type
         let mut request = String::new();
         if req.read_to_string(&mut request).is_err() {
             warn!("Unable to read request");
@@ -244,22 +245,20 @@ impl SenderHandler {
     }
 }
 
-fn get_invoke_arguments(exec_params: &Vec<FutureVar>,
-                        params: &Json) -> Result<Vec<String>, ()> {
-        let mut arguments = Vec::new();
-        for arg in exec_params {
-            match unroll_variables(arg, &params) {
-                Ok(Some(s)) => arguments.push(s),
-                Err(_) => return Err(()),
-                //We dont care about Ok(None)
-                _ => {}
-            }
+fn get_invoke_arguments(exec_params: &Vec<FutureVar>, params: &Json) -> Result<Vec<String>, ()> {
+    let mut arguments = Vec::new();
+    for arg in exec_params {
+        match unroll_variables(arg, &params) {
+            Ok(Some(s)) => arguments.push(s),
+            Err(_) => return Err(()),
+            // We dont care about Ok(None)
+            _ => {}
         }
-        Ok(arguments)
+    }
+    Ok(arguments)
 }
 
-fn unroll_variables(future: &FutureVar,
-                    params: &Json) -> Result<Option<String>,()> {
+fn unroll_variables(future: &FutureVar, params: &Json) -> Result<Option<String>, ()> {
 
     match *future {
         FutureVar::Constant(ref s) => Ok(Some(s.clone())),
@@ -272,26 +271,26 @@ fn unroll_variables(future: &FutureVar,
             }
         }
         FutureVar::Variable(ref v) => {
-            //get info from params
+            // get info from params
             // for now variables support only objects
             match params.find(&v.name as &str) {
                 Some(&Json::String(ref s)) if v.param_type == ParameterType::String => {
                     Ok(Some(s.to_owned()))
-                },
+                }
                 Some(&Json::I64(ref i)) if v.param_type == ParameterType::Number => {
                     Ok(Some(i.to_string()))
-                },
+                }
                 Some(&Json::U64(ref i)) if v.param_type == ParameterType::Number => {
                     Ok(Some(i.to_string()))
-                },
+                }
                 Some(&Json::F64(ref s)) if v.param_type == ParameterType::Number => {
                     Ok(Some(s.to_string()))
-                },
-                //Meh
+                }
+                // Meh
                 Some(ref s) => {
                     error!("Unable to convert. Value = {:?}; target type = {:?}", s, v);
                     Err(())
-                },
+                }
                 None => {
                     if v.optional {
                         Ok(None)
@@ -299,7 +298,7 @@ fn unroll_variables(future: &FutureVar,
                         error!("Missing required param {:?}", v.name);
                         Err(())
                     }
-                },
+                }
             }
         }
         FutureVar::Chained(ref c) => {
@@ -309,12 +308,12 @@ fn unroll_variables(future: &FutureVar,
             for e in c.iter() {
                 match unroll_variables(e, params) {
                     Ok(Some(ref o)) => result.push_str(o),
-                    Ok(None) | Err(_) =>  {
+                    Ok(None) | Err(_) => {
                         warn!("Optional variable {:?} is missing. Skip whole chain", e);
                         all_ok = false;
                         break;
                     }
-                };
+                }
             }
 
             if all_ok {
@@ -328,19 +327,21 @@ fn unroll_variables(future: &FutureVar,
 
 impl jsonrpc::Handler for RpcHandler {
     fn handle(&self, req: &JsonRpcRequest) -> Result<Json, ErrorJsonRpc> {
-        let method = if let Some(s) = self.methods.get(req.method) { s } else {
+        let method = if let Some(s) = self.methods.get(req.method) {
+            s
+        } else {
             error!("Requested method '{}' not found!", req.method);
             return Err(ErrorJsonRpc::new(ErrorCode::MethodNotFound));
         };
 
-        //TODO: For now hackish solution
-        //Allow not only objects but also arrays
+        // TODO: For now hackish solution
+        // Allow not only objects but also arrays
         let params = if let Some(p) = req.params {
             p.to_owned()
         } else {
             Json::Null
         };
-        //prepare arguments
+        // prepare arguments
         let arguments = if let Ok(ok) = get_invoke_arguments(&method.exec_params, &params) {
             ok
         } else {
@@ -351,8 +352,9 @@ impl jsonrpc::Handler for RpcHandler {
         info!("Method invoke with {:?}", arguments);
 
         if let Some(ref fake_response) = method.use_fake_response {
-            //delayed response...
-            info!("Delayed command execution. Faking response {}", fake_response);
+            // delayed response...
+            info!("Delayed command execution. Faking response {}",
+                  fake_response);
             let path = method.path.clone();
             let delay = method.delay * 1000;
             thread::spawn(move || {
@@ -360,23 +362,23 @@ impl jsonrpc::Handler for RpcHandler {
                 info!("Executing delayed ({}ms) command", delay);
                 match Command::new(&path).args(&arguments).output() {
                     Ok(o) => {
-                        //Log as lossy utf8.
-                        //TODO: Limit output size? Eg cat on whole partition?
+                        // Log as lossy utf8.
+                        // TODO: Limit output size? Eg cat on whole partition?
                         info!("Execution finished\nStatus: {}\nStdout: {}\nStderr: {}\n",
-                               o.status,
-                               String::from_utf8_lossy(&o.stdout),
-                               String::from_utf8_lossy(&o.stderr));
-                    },
-                    Err(e) => info!("Failed to execute process: {}", e)
+                              o.status,
+                              String::from_utf8_lossy(&o.stdout),
+                              String::from_utf8_lossy(&o.stderr));
+                    }
+                    Err(e) => info!("Failed to execute process: {}", e),
                 }
             });
             return Ok(fake_response.clone());
         } else {
             let output = Command::new(&method.path)
-                .args(&arguments)
-                .output()
-                .map(|o|String::from_utf8_lossy(&o.stdout).to_json())
-                .map_err(|_| ErrorJsonRpc::new(ErrorCode::InvalidParams));
+                             .args(&arguments)
+                             .output()
+                             .map(|o| String::from_utf8_lossy(&o.stdout).to_json())
+                             .map_err(|_| ErrorJsonRpc::new(ErrorCode::InvalidParams));
             return output;
         }
     }
@@ -397,7 +399,7 @@ fn set_log_level(level: log::LogLevelFilter) {
  * Main entry point
  * */
 fn main() {
-    //set default sane log level (we should set it to max? or max only in debug)
+    // set default sane log level (we should set it to max? or max only in debug)
     set_log_level(log::LogLevelFilter::Info);
 
     let yml = load_yaml!("app.yml");
@@ -405,22 +407,22 @@ fn main() {
 
     let config_file = m.value_of("config").unwrap_or("/etc/jsonrpcd/jsonrpcd.conf");
     let config = ServerConfig::read_from_file(config_file);
-    //set_log_level(config.log_level);
+    // set_log_level(config.log_level);
     match config.protocol_definition.protocol.clone() {
         Protocol::Https { ref address, ref port, ref cert, ref key } => {
-        //TODO: Manual create context
-        //      default values use vulnerable SSLv2, SSLv3
-        let ssl = Openssl::with_cert_and_key(cert, key).unwrap();
-        Server::https((address as &str, *port), ssl)
-            .unwrap()
-            .handle(SenderHandler::new(config))
-            .unwrap();
-        },
+            // TODO: Manual create context
+            //      default values use vulnerable SSLv2, SSLv3
+            let ssl = Openssl::with_cert_and_key(cert, key).unwrap();
+            Server::https((address as &str, *port), ssl)
+                .unwrap()
+                .handle(SenderHandler::new(config))
+                .unwrap();
+        }
         Protocol::Http { ref address, ref port } => {
-        Server::http((address as &str, *port))
-            .unwrap()
-            .handle(SenderHandler::new(config))
-            .unwrap();
+            Server::http((address as &str, *port))
+                .unwrap()
+                .handle(SenderHandler::new(config))
+                .unwrap();
         }
     }
 }
