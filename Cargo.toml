@@ -1,9 +1,6 @@
 [package]
-
 name = "server"
-
 version = "0.1.0"
-
 authors = ["Marcin <kociolek.farfocle@gmail.com>"]
 
 
@@ -13,11 +10,15 @@ rustc-serialize = "*"
 log = "0.3.2"
 yaml-rust = "0.2.2"
 regex = "0.1.41"
+clippy = {version = "0.0.21", optional = true}
 
-# https://bitbucket.org/kociolek/jsonrpc/
 [dependencies.jsonrpc]
-path = "jsonrpc"
+git = "https://kociolek@bitbucket.org/kociolek/jsonrpc.git"
 
 [dependencies.clap]
 version = "1.3.0"
 features = [ "yaml" ]
+
+[features]
+default = []
+dev = ["clippy"]
