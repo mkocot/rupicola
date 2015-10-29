@@ -195,13 +195,15 @@ impl ServerConfig {
             error!("No protocol field!");
             return Err(());
         };
-
-        Ok(ProtocolDefinition {
+        let proto_def = ProtocolDefinition {
             protocol: protocol,
             auth: auth,
             rpc_path: config["rpc"].as_str().unwrap_or("/jsonrpc").to_owned(),
             stream_path: config["streamed"].as_str().unwrap_or("/streaming").to_owned()
-        })
+        };
+        info!("Path for RPC: {}", proto_def.rpc_path);
+        info!("Path for Stream: {}", proto_def.stream_path);
+        Ok(proto_def)
     }
 
     pub fn read_from_file(config_file: &str) -> ServerConfig {
@@ -399,7 +401,9 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>,
                 parameters.insert(name, Arc::new(definition));
             }
         } else {
-            error!("Invalid value for field param");
+            if !params.is_badvalue() {
+                error!("Invalid value for field: 'param'; Method: {}", name);
+            }
         }
 
         let mut variables = Vec::<FutureVar>::new();
