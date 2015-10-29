@@ -36,7 +36,9 @@ pub enum Protocol {
 
 pub struct ProtocolDefinition {
     pub protocol: Protocol,
-    pub auth: AuthMethod
+    pub auth: AuthMethod,
+    pub stream_path: String,
+    pub rpc_path: String
 }
 
 pub struct ServerConfig {
@@ -103,9 +105,11 @@ impl ServerConfig {
         ServerConfig {
             protocol_definition: ProtocolDefinition { protocol: Protocol::Http {
                 address: "127.0.0.1".to_owned(),
-                port: 1337
+                port: 1337,
             },
-            auth: AuthMethod::None
+            auth: AuthMethod::None,
+            rpc_path: "/jsonrpc".to_owned(),
+            stream_path: "/streaming".to_owned()
             },
             methods: HashMap::new(),
             streams: HashMap::new(),
@@ -191,11 +195,15 @@ impl ServerConfig {
             error!("No protocol field!");
             return Err(());
         };
-
-        Ok(ProtocolDefinition {
+        let proto_def = ProtocolDefinition {
             protocol: protocol,
-            auth: auth
-        })
+            auth: auth,
+            rpc_path: config["rpc"].as_str().unwrap_or("/jsonrpc").to_owned(),
+            stream_path: config["streamed"].as_str().unwrap_or("/streaming").to_owned()
+        };
+        info!("Path for RPC: {}", proto_def.rpc_path);
+        info!("Path for Stream: {}", proto_def.stream_path);
+        Ok(proto_def)
     }
 
     pub fn read_from_file(config_file: &str) -> ServerConfig {
@@ -210,12 +218,9 @@ impl ServerConfig {
         let config = YamlLoader::load_from_str(&s).unwrap();
         let config_yaml = &config[0];
         server_config.protocol_definition = Self::parse_protocol_definition(config_yaml).unwrap();
-        if let Some(methods) = config_yaml["methods"].as_hash() {
-            parse_methods(methods, &mut server_config.methods);
-        }
 
-        if let Some(streams) = config_yaml["streams"].as_hash() {
-            parse_methods(streams, &mut server_config.streams);
+        if let Some(methods) = config_yaml["methods"].as_hash() {
+            parse_methods(methods, &mut server_config.methods, &mut server_config.streams);
         }
 
         if let Some(log_level) = config_yaml["log"]["level"].as_str() {
@@ -344,7 +349,9 @@ fn parse_param(exec_param: &Yaml, parameters: &HashMap<String, Arc<ParameterDefi
     }
 }
 
-fn parse_methods(methods: &BTreeMap<Yaml, Yaml>, config_methods: &mut HashMap<String, MethodDefinition>) {
+fn parse_methods(methods: &BTreeMap<Yaml, Yaml>,
+                 rpc_config_methods: &mut HashMap<String, MethodDefinition>,
+                 str_config_methods: &mut HashMap<String, MethodDefinition>) {
     for (method_name, method_def) in methods {
         //Name method MUST be string
         let name = match method_name.as_str() {
@@ -356,6 +363,7 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>, config_methods: &mut HashMap<St
             warn!("Method {}: Missing required parameter 'invoke'", name);
             continue;
         }
+        let streamed = method_def["streamed"].as_bool().unwrap_or(false);
         //The EXEC type method
         let path = invoke["exec"].as_str().unwrap();
         let delay = invoke["delay"].as_i64()
@@ -393,7 +401,9 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>, config_methods: &mut HashMap<St
                 parameters.insert(name, Arc::new(definition));
             }
         } else {
-            error!("Invalid value for field param");
+            if !params.is_badvalue() {
+                error!("Invalid value for field: 'param'; Method: {}", name);
+            }
         }
 
         let mut variables = Vec::<FutureVar>::new();
@@ -421,6 +431,11 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>, config_methods: &mut HashMap<St
             use_fake_response: fake_response,
             delay: delay
         };
-        config_methods.insert(method_definition.name.clone(), method_definition);
+
+        if streamed {
+            str_config_methods.insert(method_definition.name.clone(), method_definition);
+        } else {
+            rpc_config_methods.insert(method_definition.name.clone(), method_definition);
+        }
     }
 }

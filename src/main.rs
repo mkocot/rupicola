@@ -65,13 +65,14 @@ impl Handler for SenderHandler {
 
         if req.method == hyper::Post {
             if let RequestUri::AbsolutePath(ref path) = req.uri.clone() {
-                match path as &str {
-                "/streaming" => self.handle_streaming(req, res),
-                "/jsonrpc" => self.handle_json_rpc(req, res),
-                _ => {
+                let path = path as &str;
+                if self.config.protocol_definition.stream_path == path {
+                    self.handle_streaming(req, res)
+                } else if self.config.protocol_definition.rpc_path == path {
+                    self.handle_json_rpc(req, res)
+                } else {
                     error!("Unknown request path: {}", path);
                     *res.status_mut() = StatusCode::NotFound
-                    }
                 }
             }
         } else {
@@ -327,9 +328,8 @@ fn unroll_variables(future: &FutureVar,
 
 impl jsonrpc::Handler for RpcHandler {
     fn handle(&self, req: &JsonRpcRequest) -> Result<Json, ErrorJsonRpc> {
-
         let method = if let Some(s) = self.methods.get(req.method) { s } else {
-            error!("Requested method '{}' not found!", &req.method);
+            error!("Requested method '{}' not found!", req.method);
             return Err(ErrorJsonRpc::new(ErrorCode::MethodNotFound));
         };
 
