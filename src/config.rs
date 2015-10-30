@@ -13,6 +13,7 @@ use rustc_serialize::json::{ToJson, Json};
 use yaml_rust::{YamlLoader, Yaml};
 use std::collections::{HashMap, BTreeMap};
 use std::fs::File;
+use log::{LogRecord, LogLevelFilter, LogMetadata};
 
 pub enum AuthMethod {
     None,
@@ -63,12 +64,6 @@ pub struct MethodDefinition {
     pub delay: u32,
 }
 
-// #[derive(Clone)]
-// pub enum MethodType {
-//    Exec {
-//    }
-// }
-
 #[derive(Debug, Clone)]
 pub enum FutureVar {
     // This is just constant string
@@ -100,6 +95,30 @@ pub struct ParameterDefinition {
     pub name: String,
     pub optional: bool,
     pub param_type: ParameterType,
+}
+
+struct SimpleLogger;
+
+impl log::Log for SimpleLogger {
+    fn enabled(&self, _: &LogMetadata) -> bool {
+        true
+    }
+
+    fn log(&self, record: &LogRecord) {
+        if self.enabled(record.metadata()) {
+            println!("{} - {}", record.level(), record.args());
+        }
+    }
+}
+
+fn set_log_level(level: log::LogLevelFilter) {
+    if let Err(e) = log::set_logger(|max_log_level| {
+        max_log_level.set(level);
+        Box::new(SimpleLogger)
+    }) {
+        println!("Log framework failed {}", e);
+    }
+
 }
 
 impl ServerConfig {
@@ -214,16 +233,36 @@ impl ServerConfig {
     }
 
     pub fn read_from_file(config_file: &str) -> ServerConfig {
-        let mut server_config = ServerConfig::new();
-
-        info!("Using configuration from: {}", config_file);
-
         // parse config file
         let mut f = File::open(config_file).unwrap();
         let mut s = String::new();
         f.read_to_string(&mut s).unwrap();
         let config = YamlLoader::load_from_str(&s).unwrap();
         let config_yaml = &config[0];
+
+        let mut server_config = ServerConfig::new();
+
+        if let Some(log_level) = config_yaml["log"]["level"].as_str() {
+            server_config.log_level = match &log_level.to_lowercase() as &str {
+                "trace" => LogLevelFilter::Trace,
+                "debug" => LogLevelFilter::Debug,
+                "info" => LogLevelFilter::Info,
+                "warn" => LogLevelFilter::Warn,
+                "error" => LogLevelFilter::Error,
+                "off" => LogLevelFilter::Off,
+                unknown => {
+                    // Just fallback to already set default
+                    set_log_level(server_config.log_level);
+                    warn!("Unknown log level: {}", unknown);
+                    server_config.log_level
+                }
+            };
+        }
+
+        // set default sane log level (we should set it to max? or max only in debug)
+        set_log_level(server_config.log_level);
+        info!("Using configuration from: {}", config_file);
+
         server_config.protocol_definition = Self::parse_protocol_definition(config_yaml).unwrap();
 
         if let Some(methods) = config_yaml["methods"].as_hash() {
@@ -232,21 +271,6 @@ impl ServerConfig {
                           &mut server_config.streams);
         }
 
-        if let Some(log_level) = config_yaml["log"]["level"].as_str() {
-            server_config.log_level = match &log_level.to_lowercase() as &str {
-                "trace" => log::LogLevelFilter::Trace,
-                "debug" => log::LogLevelFilter::Debug,
-                "info" => log::LogLevelFilter::Info,
-                "warn" => log::LogLevelFilter::Warn,
-                "error" => log::LogLevelFilter::Error,
-                "off" => log::LogLevelFilter::Off,
-                unknown => {
-                    // Just fallback to already set default
-                    warn!("Unknown log level: {}", unknown);
-                    server_config.log_level
-                }
-            };
-        }
         server_config
     }
 }
@@ -255,7 +279,7 @@ fn parse_param(exec_param: &Yaml,
                parameters: &HashMap<String, Arc<ParameterDefinition>>)
                -> Result<FutureVar, ()> {
     // this should make FLAT structure in future
-    info!("Exec param: {:?}", exec_param);
+    debug!("Exec param: {:?}", exec_param);
 
     fn extract_simple(exec_param: &Yaml,
                       parameters: &HashMap<String, Arc<ParameterDefinition>>)
@@ -299,11 +323,16 @@ fn parse_param(exec_param: &Yaml,
         let mut ugly_solution = Vec::new();
         // Convert current vector to queue
         let mut current_queue: VecDeque<_> = v.iter().collect();
-        info!("Nested structure: {:?}", current_queue);
+        debug!("Nested structure: {:?}", current_queue);
 
         while !current_queue.is_empty() {
             // At this point we know it never be empty
-            let element = current_queue.pop_front().unwrap();
+            let element = if let Some(s) = current_queue.pop_front() { 
+                s
+            } else {
+                error!("Empty queue, reported as non empty");
+                return Err(());
+            };
             match *element {
                 // is this simple and well known thingy?
                 Yaml::String(_) |
@@ -311,12 +340,22 @@ fn parse_param(exec_param: &Yaml,
                 Yaml::Integer(_) |
                 Yaml::Boolean(_) |
                 Yaml::Hash(_) => {
-                    let item = extract_simple(&element, parameters).unwrap();
+                    let item = if let Ok(s) = extract_simple(&element, parameters) {
+                        s
+                    } else {
+                        error!("Invalid definition in parameter {:?}", element);
+                        return Err(());
+                    };
 
                     let to_add = if ugly_solution.is_empty() || !item.is_constant() {
                         item
                     } else {
-                        let last_item = ugly_solution.pop().unwrap();
+                        let last_item = if let Some(s) = ugly_solution.pop() {
+                            s
+                        } else {
+                            error!("Empty queue reported as non empty");
+                            return Err(());
+                        };
                         match last_item {
                             FutureVar::Constant(ref s) => {
                                 // create new constant
@@ -326,11 +365,11 @@ fn parse_param(exec_param: &Yaml,
                                 };
                                 let mut a = s.clone();
                                 a.push_str(&current_item);
-                                info!("Merged: {:?}", a);
+                                debug!("Merged: {:?}", a);
                                 FutureVar::Constant(a.to_owned())
                             }
                             _ => {
-                                info!("Put back");
+                                debug!("Put back");
                                 ugly_solution.push(last_item);
                                 item
                             }
@@ -344,14 +383,14 @@ fn parse_param(exec_param: &Yaml,
                     // We need reverse order when adding parametes
                     // so firs element in array is first in queue
                     for item in array.iter().rev() {
-                        info!("Pushing to queue {:?}", item);
+                        debug!("Pushing to queue {:?}", item);
                         current_queue.push_front(item);
                     }
                 }
                 _ => error!("Unsupported element: {:?}", element),
             }
         }
-        info!("Final single chain: {:?}", ugly_solution);
+        debug!("Final single chain: {:?}", ugly_solution);
         // Great we should have single level vector
         // In case of single element just return it without wrapper
         if ugly_solution.len() == 1 {
@@ -385,8 +424,15 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>,
             continue;
         }
         let streamed = method_def["streamed"].as_bool().unwrap_or(false);
+
         // The EXEC type method
-        let path = invoke["exec"].as_str().unwrap();
+        let path = if let Some(path) = invoke["exec"].as_str() {
+            path
+        } else {
+            error!("Required parameter missin: path. Skip definition for {}", name);
+            continue;
+        };
+
         let delay = invoke["delay"]
                         .as_i64()
                         .and_then(|delay| {
@@ -404,7 +450,12 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>,
         if let Some(mapa) = params.as_hash() {
             for (name_it, definition_it) in mapa {
                 // required
-                let name = name_it.as_str().unwrap().to_owned();
+                let name = if let Some(s) = name_it.as_str().map(|s| s.to_owned()) {
+                    s
+                } else {
+                    error!("Invalid name. Ignored");
+                    continue;
+                };
                 if name == "self" {
                     error!("Used restricted keyword 'self'. Ignoring.");
                     continue;
@@ -425,7 +476,6 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>,
                     name: name.clone(),
                     optional: optional,
                 };
-                info!("Param: {:?}", name);
                 parameters.insert(name, Arc::new(definition));
             }
         } else {
@@ -438,7 +488,11 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>,
 
         if let Some(exec_params) = invoke["args"].as_vec() {
             for exec_param in exec_params {
-                variables.push(parse_param(exec_param, &parameters).unwrap());
+                if let Ok(ok) = parse_param(exec_param, &parameters) {
+                    variables.push(ok);
+                } else {
+                    warn!("Invalid arg enntry: {:?}. Skip", exec_param);
+                }
             }
         }
         // For now only string...

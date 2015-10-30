@@ -19,14 +19,12 @@ use hyper::uri::RequestUri;
 use hyper::net::Openssl;
 use hyper::header::{Authorization, Basic};
 use jsonrpc::{JsonRpcServer, JsonRpcRequest, ErrorCode, ErrorJsonRpc};
-use log::{LogRecord, LogLevel, LogMetadata};
 use rustc_serialize::json::{ToJson, Json};
 use std::thread;
 use std::io::{Read, BufReader, BufRead, Write};
 use std::process::{Command, Stdio};
 use std::collections::HashMap;
 
-struct SimpleLogger;
 struct SenderHandler {
     // unique client request tracing?
     // request_id: u32,
@@ -36,18 +34,6 @@ struct SenderHandler {
 
 struct RpcHandler {
     methods: HashMap<String, MethodDefinition>,
-}
-
-impl log::Log for SimpleLogger {
-    fn enabled(&self, metadata: &LogMetadata) -> bool {
-        metadata.level() <= LogLevel::Info
-    }
-
-    fn log(&self, record: &LogRecord) {
-        if self.enabled(record.metadata()) {
-            println!("{} - {}", record.level(), record.args());
-        }
-    }
 }
 
 impl Handler for SenderHandler {
@@ -384,24 +370,10 @@ impl jsonrpc::Handler for RpcHandler {
     }
 }
 
-fn set_log_level(level: log::LogLevelFilter) {
-    if let Err(e) = log::set_logger(|max_log_level| {
-        max_log_level.set(level);
-        Box::new(SimpleLogger)
-    }) {
-        println!("Log framework failed {}", e);
-    }
-
-}
-
-
 /**
  * Main entry point
  * */
 fn main() {
-    // set default sane log level (we should set it to max? or max only in debug)
-    set_log_level(log::LogLevelFilter::Info);
-
     let yml = load_yaml!("app.yml");
     let m = App::from_yaml(yml).get_matches();
 
