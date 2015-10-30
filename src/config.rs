@@ -52,6 +52,12 @@ pub struct ServerConfig {
     pub log_level: log::LogLevelFilter,
 }
 
+#[derive(Clone, PartialEq)]
+pub enum ResponseEncoding {
+    Utf8,
+    Base64,
+}
+
 #[derive(Clone)]
 pub struct MethodDefinition {
     pub name: String,
@@ -62,6 +68,7 @@ pub struct MethodDefinition {
     pub use_fake_response: Option<Json>,
     /// Delayed execution in seconds
     pub delay: u32,
+    pub response_encoding: ResponseEncoding,
 }
 
 #[derive(Debug, Clone)]
@@ -502,6 +509,24 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>,
             None
         };
 
+        //This is a bug? Sometimes rustc cant handle &String to &str conversion
+        let response_encoding = match &method_def["encoding"].as_str()
+            .map(|s| s.to_lowercase()).unwrap_or("".to_owned()) as &str {
+                "utf-8" => ResponseEncoding::Utf8,
+                "base64" => ResponseEncoding::Base64,
+                default => {
+                    warn!("Unknown encoding: {}. Using utf-8", default);
+                    ResponseEncoding::Utf8
+                }
+        };
+
+        if response_encoding != ResponseEncoding::Utf8 && fake_response.is_some() {
+            warn!("Used encoding for fake response. This setting will be ignored");
+        }
+
+        if response_encoding != ResponseEncoding::Utf8 && streamed {
+            warn!("Encoding is ignored for streaming mode");
+        }
 
         let method_definition = MethodDefinition {
             name: name.to_owned(),
@@ -512,6 +537,7 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>,
             variables: parameters,
             use_fake_response: fake_response,
             delay: delay,
+            response_encoding: response_encoding,
         };
 
         if streamed {

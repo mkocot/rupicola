@@ -20,6 +20,7 @@ use hyper::net::Openssl;
 use hyper::header::{Authorization, Basic};
 use jsonrpc::{JsonRpcServer, JsonRpcRequest, ErrorCode, ErrorJsonRpc};
 use rustc_serialize::json::{ToJson, Json};
+use rustc_serialize::base64::{STANDARD, ToBase64};
 use std::thread;
 use std::io::{Read, BufReader, BufRead, Write};
 use std::process::{Command, Stdio};
@@ -199,17 +200,26 @@ impl SenderHandler {
             return Ok(());
         };
 
-        // Read as hytes chunks
-        let reader = BufReader::new(stdout_stream);
-        for line in reader.split(b'\n') {
-            let line = try!(line);
-            // Ignore all non utf8 characters (well this is log anyway)
-            debug!("<-- {}", String::from_utf8_lossy(&line));
-            // Respond to client with content "as-is"
-            try!(streaming_response.write(&line));
-            try!(streaming_response.write(b"\n"));
+        // Read as bytes chunks
+        let mut reader = BufReader::new(stdout_stream);
+        //if method.response_encoding == ResponseEncoding::Utf8 {
+        //    for line in reader.split(b'\n') {
+        //        let line = try!(line);
+        //        // Ignore all non utf8 characters (well this is log anyway)
+        //        debug!("<-- {}", String::from_utf8_lossy(&line));
+        //        // Respond to client with content "as-is"
+        //        try!(streaming_response.write(&line));
+        //        try!(streaming_response.write(b"\n"));
+        //        try!(streaming_response.flush());
+        //    }
+        //} else {
+        let mut read_buffer = [0; 1024];
+        while let Ok(readed) = reader.read(&mut read_buffer[..]) {
+            try!(streaming_response.write(&read_buffer[0..readed]));
             try!(streaming_response.flush());
-        }
+        } 
+        //}
+
         Ok(())
     }
 
@@ -358,12 +368,20 @@ impl jsonrpc::Handler for RpcHandler {
                     Err(e) => info!("Failed to execute process: {}", e),
                 }
             });
+            //This method support only utf-8 (we just spit whole json from config...)
             return Ok(fake_response.clone());
         } else {
+            //Encode to baseXY?
             let output = Command::new(&method.path)
                              .args(&arguments)
                              .output()
-                             .map(|o| String::from_utf8_lossy(&o.stdout).to_json())
+                             .map(|o| { 
+                                 if method.response_encoding == ResponseEncoding::Utf8 {
+                                    String::from_utf8_lossy(&o.stdout).to_json()
+                                 } else {
+                                    o.stdout.to_base64(STANDARD).to_json()
+                                 }
+                             })
                              .map_err(|_| ErrorJsonRpc::new(ErrorCode::InvalidParams));
             return output;
         }
