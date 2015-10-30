@@ -197,7 +197,7 @@ impl SenderHandler {
                                          .spawn());
 
         // Pipe stdout
-        let stdout_stream = if let Some(s) = child_process.stdout {
+        let mut reader = if let Some(s) = child_process.stdout {
             s
         } else {
             warn!("Program closed without opening stdout. This is unexpected.");
@@ -206,24 +206,15 @@ impl SenderHandler {
         };
 
         // Read as bytes chunks
-        let mut reader = BufReader::new(stdout_stream);
-        //if method.response_encoding == ResponseEncoding::Utf8 {
-        //    for line in reader.split(b'\n') {
-        //        let line = try!(line);
-        //        // Ignore all non utf8 characters (well this is log anyway)
-        //        debug!("<-- {}", String::from_utf8_lossy(&line));
-        //        // Respond to client with content "as-is"
-        //        try!(streaming_response.write(&line));
-        //        try!(streaming_response.write(b"\n"));
-        //        try!(streaming_response.flush());
-        //    }
-        //} else {
-        let mut read_buffer = [0; 1024];
+        let mut read_buffer = [0; 2048];
         while let Ok(readed) = reader.read(&mut read_buffer[..]) {
+            if readed == 0 {
+                info!("End of stream");
+                break;
+            }
             try!(streaming_response.write(&read_buffer[0..readed]));
             try!(streaming_response.flush());
         } 
-        //}
 
         Ok(())
     }
