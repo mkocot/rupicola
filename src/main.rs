@@ -134,9 +134,14 @@ impl SenderHandler {
                 return;
             }
         };
+        let empty = Json::Null;
+        let params = if let Some(j) = request_json.find("params") {
+            j
+        } else {
+            &empty
+        };
 
-        let params = &request_json["params"];
-
+        //let params = &request_json["params"];
         let method_name = if let Some(s) = request_json["method"].as_string() {
             s
         } else {
@@ -305,7 +310,7 @@ fn unroll_variables(future: &FutureVar, params: &Json) -> Result<Option<String>,
                 match unroll_variables(e, params) {
                     Ok(Some(ref o)) => result.push_str(o),
                     Ok(None) | Err(_) => {
-                        warn!("Optional variable {:?} is missing. Skip whole chain", e);
+                        debug!("Optional variable {:?} is missing. Skip whole chain", e);
                         all_ok = false;
                         break;
                     }

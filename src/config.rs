@@ -487,7 +487,7 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>,
             }
         } else {
             if !params.is_badvalue() {
-                error!("Invalid value for field: 'param'; Method: {}", name);
+                error!("[{}] Invalid value for field: 'param'", name);
             }
         }
 
@@ -498,7 +498,7 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>,
                 if let Ok(ok) = parse_param(exec_param, &parameters) {
                     variables.push(ok);
                 } else {
-                    warn!("Invalid arg enntry: {:?}. Skip", exec_param);
+                    warn!("[{}] Invalid arg enntry: {:?}. Skip", name, exec_param);
                 }
             }
         }
@@ -515,17 +515,19 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>,
                 "utf-8" => ResponseEncoding::Utf8,
                 "base64" => ResponseEncoding::Base64,
                 default => {
-                    warn!("Unknown encoding: {}. Using utf-8", default);
+                    if !default.is_empty() {
+                        warn!("[{}] Unknown encoding: {}. Using utf-8", name, default);
+                    }
                     ResponseEncoding::Utf8
                 }
         };
 
         if response_encoding != ResponseEncoding::Utf8 && fake_response.is_some() {
-            warn!("Used encoding for fake response. This setting will be ignored");
+            warn!("[{}] Used encoding for fake response. This setting will be ignored", name);
         }
 
         if response_encoding != ResponseEncoding::Utf8 && streamed {
-            warn!("Encoding is ignored for streaming mode");
+            warn!("[{}]: Encoding is ignored for streaming mode", name);
         }
 
         let method_definition = MethodDefinition {
@@ -539,6 +541,8 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>,
             delay: delay,
             response_encoding: response_encoding,
         };
+
+        info!("Registered method: {}. Support streaming: {}", name, streamed);
 
         if streamed {
             str_config_methods.insert(method_definition.name.clone(), method_definition);
