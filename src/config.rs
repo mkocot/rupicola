@@ -5,6 +5,7 @@ extern crate log;
 extern crate clap;
 extern crate yaml_rust;
 extern crate regex;
+extern crate crypto;
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -15,11 +16,42 @@ use std::collections::{HashMap, BTreeMap};
 use std::fs::File;
 use log::{LogRecord, LogLevelFilter, LogMetadata};
 
+// Why FFS self::crypto?!
+use self::crypto::digest::Digest;
+use self::crypto::md5::Md5;
+use self::crypto::sha1::Sha1;
+
+pub enum PassType {
+    Plain(String),
+    Md5(String),
+    Sha1(String),
+}
+
+impl PassType {
+    pub fn validate(&self, pass: &str) -> bool {
+        match *self {
+            PassType::Plain(ref p) => p == pass,
+
+            PassType::Md5(ref hash) => {
+                let mut md5 = Md5::new();
+                md5.input_str(pass);
+                &md5.result_str() == hash
+            },
+
+            PassType::Sha1(ref hash) => {
+                let mut sha1 = Sha1::new();
+                sha1.input_str(pass);
+                &sha1.result_str() == hash
+            }
+        }
+    }
+}
+
 pub enum AuthMethod {
     None,
     Basic {
         login: String,
-        pass: String,
+        pass: PassType,
     },
 }
 
@@ -198,27 +230,36 @@ impl ServerConfig {
             // we want basic auth?
             let basic_auth_config = &protocol_definition["auth-basic"];
             auth = if !basic_auth_config.is_badvalue() {
-                // Ok we get non empty node check if we have all required fields
-                match (&basic_auth_config["login"], &basic_auth_config["password"]) {
-                    (&Yaml::String(ref login), &Yaml::String(ref password)) => {
-                        info!("Using basic auth");
-                        AuthMethod::Basic {
-                            login: login.to_owned(),
-                            pass: password.to_owned(),
-                        }
-                    }
-                    (&Yaml::String(_), _) => {
-                        error!("basic-auth: login field required");
-                        return Err(());
-                    }
-                    (_, &Yaml::String(_)) => {
-                        error!("basic-auth: password field required");
-                        return Err(());
-                    }
+                let login = if let Some(s) = basic_auth_config["login"].as_str() {
+                    s.to_owned()
+                } else {
+                    warn!("basic-auth: Invalid or absent login field");
+                    return Err(());
+                };
+
+                //Digest: None, Md5, Sha1, moar in future
+                let pass_digest = basic_auth_config["password"]["digest"].as_str().unwrap_or("none").to_lowercase();
+                let pass_hash = if let Some(s) =  basic_auth_config["password"]["hash"].as_str() {
+                    s.to_owned()
+                } else {
+                    warn!("basic-auth: No required hash field");
+                    return Err(());
+                };
+
+                //type conversion bug again
+                let pass = match &pass_digest as &str {
+                    "none" => PassType::Plain(pass_hash),
+                    "sha1" => PassType::Sha1(pass_hash),
+                    "md5" => PassType::Md5(pass_hash),
                     _ => {
-                        error!("Invalid basic-auth definition!");
+                        warn!("basic-auth: Invalid digest!");
                         return Err(());
                     }
+                };
+
+                AuthMethod::Basic {
+                    login: login,
+                    pass: pass
                 }
             } else {
                 warn!("Server is free4all. Consider using some kind of auth");

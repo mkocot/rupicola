@@ -22,7 +22,7 @@ use jsonrpc::{JsonRpcServer, JsonRpcRequest, ErrorCode, ErrorJsonRpc};
 use rustc_serialize::json::{ToJson, Json};
 use rustc_serialize::base64::{STANDARD, ToBase64};
 use std::thread;
-use std::io::{Read, BufReader, BufRead, Write};
+use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 use std::collections::HashMap;
 
@@ -96,9 +96,9 @@ impl SenderHandler {
                 // check if user provided required credentials
                 let auth_heder = req.headers.get::<Authorization<Basic>>();
                 if let Some(ref auth) = auth_heder {
-                    // ok
+                    // ok.. remove owned string
                     let password = auth.password.clone().unwrap_or("".to_owned());
-                    if auth.username != *login || password != *pass {
+                    if auth.username != *login || !pass.validate(&password) {
                         warn!("Invalid username or password");
                         false
                     } else {

@@ -5,12 +5,15 @@ authors = ["Marcin <kociolek.farfocle@gmail.com>"]
 
 
 [dependencies]
+serde="*"
+serde_json="*"
 hyper = "*"
 rustc-serialize = "*"
 log = "0.3.2"
 yaml-rust = "0.2.2"
 regex = "0.1.41"
 clippy = {version = "0.0.21", optional = true}
+rust-crypto = "0.2.34"
 
 [dependencies.jsonrpc]
 git = "https://kociolek@bitbucket.org/kociolek/jsonrpc.git"
