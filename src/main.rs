@@ -1,6 +1,6 @@
 // Local files/dependencies
 mod config;
-
+mod params;
 // External dependencies
 #[macro_use]
 extern crate clap;
@@ -26,9 +26,9 @@ use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 use std::collections::HashMap;
 
+use params::{Unroll, MethodParam};
+
 struct SenderHandler {
-    // unique client request tracing?
-    // request_id: u32,
     json_rpc: JsonRpcServer<RpcHandler>,
     config: ServerConfig,
 }
@@ -214,7 +214,7 @@ impl SenderHandler {
             }
             try!(streaming_response.write(&read_buffer[0..readed]));
             try!(streaming_response.flush());
-        } 
+        }
 
         Ok(())
     }
@@ -237,10 +237,10 @@ impl SenderHandler {
     }
 }
 
-fn get_invoke_arguments(exec_params: &Vec<FutureVar>, params: &Json) -> Result<Vec<String>, ()> {
+fn get_invoke_arguments(exec_params: &Vec<MethodParam>, params: &Json) -> Result<Vec<String>, ()> {
     let mut arguments = Vec::new();
     for arg in exec_params {
-        match unroll_variables(arg, &params) {
+        match arg.unroll(&params) {
             Ok(Some(s)) => arguments.push(s),
             Err(_) => return Err(()),
             // We dont care about Ok(None)
@@ -248,73 +248,6 @@ fn get_invoke_arguments(exec_params: &Vec<FutureVar>, params: &Json) -> Result<V
         }
     }
     Ok(arguments)
-}
-
-fn unroll_variables(future: &FutureVar, params: &Json) -> Result<Option<String>, ()> {
-
-    match *future {
-        FutureVar::Constant(ref s) => Ok(Some(s.clone())),
-        FutureVar::Everything => {
-            let json = params.to_json().to_string();
-            if json.is_empty() {
-                Ok(None)
-            } else {
-                Ok(Some(json))
-            }
-        }
-        FutureVar::Variable(ref v) => {
-            // get info from params
-            // for now variables support only objects
-            match params.find(&v.name as &str) {
-                Some(&Json::String(ref s)) if v.param_type == ParameterType::String => {
-                    Ok(Some(s.to_owned()))
-                }
-                Some(&Json::I64(ref i)) if v.param_type == ParameterType::Number => {
-                    Ok(Some(i.to_string()))
-                }
-                Some(&Json::U64(ref i)) if v.param_type == ParameterType::Number => {
-                    Ok(Some(i.to_string()))
-                }
-                Some(&Json::F64(ref s)) if v.param_type == ParameterType::Number => {
-                    Ok(Some(s.to_string()))
-                }
-                // Meh
-                Some(ref s) => {
-                    error!("Unable to convert. Value = {:?}; target type = {:?}", s, v);
-                    Err(())
-                }
-                None => {
-                    if v.optional {
-                        Ok(None)
-                    } else {
-                        error!("Missing required param {:?}", v.name);
-                        Err(())
-                    }
-                }
-            }
-        }
-        FutureVar::Chained(ref c) => {
-            let mut result = String::new();
-            let mut all_ok = true;
-
-            for e in c.iter() {
-                match unroll_variables(e, params) {
-                    Ok(Some(ref o)) => result.push_str(o),
-                    Ok(None) | Err(_) => {
-                        debug!("Optional variable {:?} is missing. Skip whole chain", e);
-                        all_ok = false;
-                        break;
-                    }
-                }
-            }
-
-            if all_ok {
-                Ok(Some(result))
-            } else {
-                Ok(None)
-            }
-        }
-    }
 }
 
 impl jsonrpc::Handler for RpcHandler {
@@ -371,7 +304,7 @@ impl jsonrpc::Handler for RpcHandler {
             let output = Command::new(&method.path)
                              .args(&arguments)
                              .output()
-                             .map(|o| { 
+                             .map(|o| {
                                  if method.response_encoding == ResponseEncoding::Utf8 {
                                     String::from_utf8_lossy(&o.stdout).to_json()
                                  } else {

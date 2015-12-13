@@ -15,6 +15,7 @@ use yaml_rust::{YamlLoader, Yaml};
 use std::collections::{HashMap, BTreeMap};
 use std::fs::File;
 use log::{LogRecord, LogLevelFilter, LogMetadata};
+use params::MethodParam;
 
 // Why FFS self::crypto?!
 use self::crypto::digest::Digest;
@@ -95,7 +96,7 @@ pub struct MethodDefinition {
     pub name: String,
     pub path: String,
     // how parse request
-    pub exec_params: Vec<FutureVar>,
+    pub exec_params: Vec<MethodParam>,
     pub variables: HashMap<String, Arc<ParameterDefinition>>,
     pub use_fake_response: Option<Json>,
     /// Delayed execution in seconds
@@ -103,21 +104,11 @@ pub struct MethodDefinition {
     pub response_encoding: ResponseEncoding,
 }
 
-#[derive(Debug, Clone)]
-pub enum FutureVar {
-    // This is just constant string
-    Constant(String),
-    // This is ref to parameter definition
-    Variable(Arc<ParameterDefinition>),
-    Chained(Vec<FutureVar>),
-    // Capture all params as one-line json string
-    Everything,
-}
 
-impl FutureVar {
+impl MethodParam {
     pub fn is_constant(&self) -> bool {
         match *self {
-            FutureVar::Constant(_) => true,
+            MethodParam::Constant(_) => true,
             _ => false,
         }
     }
@@ -198,8 +189,8 @@ impl ServerConfig {
                     info!("Port: {}", port);
                     port as u16
                 } else {
-                    error!("No port! Using 1337");
-                    1337
+                    error!("No port defined!");
+                    return Err(());
                 };
 
                 info!("Protocol type: {}", protocol_type);
@@ -325,13 +316,13 @@ impl ServerConfig {
 
 fn parse_param(exec_param: &Yaml,
                parameters: &HashMap<String, Arc<ParameterDefinition>>)
-               -> Result<FutureVar, ()> {
+               -> Result<MethodParam, ()> {
     // this should make FLAT structure in future
     debug!("Exec param: {:?}", exec_param);
 
     fn extract_simple(exec_param: &Yaml,
                       parameters: &HashMap<String, Arc<ParameterDefinition>>)
-                      -> Result<FutureVar, ()> {
+                      -> Result<MethodParam, ()> {
         // Bind all simple types
         if let Some(c) = match *exec_param {
             Yaml::Real(ref s) | Yaml::String(ref s) => Some(s.to_owned()),
@@ -340,7 +331,7 @@ fn parse_param(exec_param: &Yaml,
             // Complex types
             _ => None,
         } {
-            return Ok(FutureVar::Constant(c));
+            return Ok(MethodParam::Constant(c));
         }
         // Do we have simple parameter reference here?
         if exec_param.as_hash().is_some() {
@@ -348,12 +339,12 @@ fn parse_param(exec_param: &Yaml,
                       .as_str()
                       .ok_or("Expected {{param: name}} object!")
                       .and_then(|s| parameters.get(s).ok_or("No binding for variable."))
-                      .map(|s| FutureVar::Variable(s.clone())) {
+                      .map(|s| MethodParam::Variable(s.clone())) {
                 Ok(s) => return Ok(s),
                 Err(e) => {
                     // we need to check if this is case of self
                     match exec_param["param"].as_str() {
-                        Some("self") => return Ok(FutureVar::Everything),
+                        Some("self") => return Ok(MethodParam::Everything),
                         _ => {
                             error!("Error: processing {:?} - {}", exec_param["param"], e);
                             return Err(());
@@ -375,7 +366,7 @@ fn parse_param(exec_param: &Yaml,
 
         while !current_queue.is_empty() {
             // At this point we know it never be empty
-            let element = if let Some(s) = current_queue.pop_front() { 
+            let element = if let Some(s) = current_queue.pop_front() {
                 s
             } else {
                 error!("Empty queue, reported as non empty");
@@ -405,16 +396,16 @@ fn parse_param(exec_param: &Yaml,
                             return Err(());
                         };
                         match last_item {
-                            FutureVar::Constant(ref s) => {
+                            MethodParam::Constant(ref s) => {
                                 // create new constant
                                 let current_item = match item {
-                                    FutureVar::Constant(s) => s,
+                                    MethodParam::Constant(s) => s,
                                     _ => panic!("Impossibru"),
                                 };
                                 let mut a = s.clone();
                                 a.push_str(&current_item);
                                 debug!("Merged: {:?}", a);
-                                FutureVar::Constant(a.to_owned())
+                                MethodParam::Constant(a.to_owned())
                             }
                             _ => {
                                 debug!("Put back");
@@ -445,7 +436,7 @@ fn parse_param(exec_param: &Yaml,
             info!("Final chain is single item. Just return this element");
             return Ok(ugly_solution.pop().unwrap());
         }
-        return Ok(FutureVar::Chained(ugly_solution));
+        return Ok(MethodParam::Chained(ugly_solution));
     } else {
         // Just for printing error
         extract_simple(exec_param, parameters).map_err(|_| {
@@ -532,7 +523,7 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>,
             }
         }
 
-        let mut variables = Vec::<FutureVar>::new();
+        let mut variables = Vec::<MethodParam>::new();
 
         if let Some(exec_params) = invoke["args"].as_vec() {
             for exec_param in exec_params {
