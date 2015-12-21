@@ -1,6 +1,10 @@
 // Local files/dependencies
 mod config;
 mod params;
+mod handlers;
+mod lazy_response;
+mod rpc;
+
 // External dependencies
 #[macro_use]
 extern crate clap;
@@ -18,27 +22,82 @@ use hyper::server::{Server, Request, Response, Handler};
 use hyper::uri::RequestUri;
 use hyper::net::Openssl;
 use hyper::header::{Authorization, Basic};
-use jsonrpc::{JsonRpcServer, JsonRpcRequest, ErrorCode, ErrorJsonRpc};
-use rustc_serialize::json::{ToJson, Json};
-use rustc_serialize::base64::{STANDARD, ToBase64};
-use std::thread;
+use jsonrpc::JsonRpcServer;
+use rustc_serialize::json::Json;
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
-use std::collections::HashMap;
 
-use params::{Unroll, MethodParam};
+use lazy_response::LazyResponse;
+use rpc::{RpcHandler, get_invoke_arguments};
+use handlers::{HandlerError, ResponseHandler};
 
 struct SenderHandler {
     json_rpc: JsonRpcServer<RpcHandler>,
     config: ServerConfig,
 }
 
-struct RpcHandler {
-    methods: HashMap<String, MethodDefinition>,
+impl ResponseHandler for SenderHandler {
+    fn handle_response(&self, req: &mut Read, res: &mut Write) -> Result<(), HandlerError> {
+        // Read streaming method name from path
+        // POST /streaming
+        let mut request_str = String::new();
+        // TODO: Limit read size
+        if let Err(e) = req.read_to_string(&mut request_str) {
+            error!("Reading request failed {:?}", e);
+            return Err(HandlerError::InvalidRequest);
+        }
+        info!("--> {}", request_str);
+        let request_json = match Json::from_str(&request_str) {
+            Ok(s) => s,
+            Err(e) => {
+                error!("Invalid JSON request: {:?}", e);
+                return Err(HandlerError::InvalidRequest);
+            }
+        };
+        let empty = Json::Null;
+        let params = if let Some(j) = request_json.find("params") {
+            j
+        } else {
+            &empty
+        };
+
+        //let params = &request_json["params"];
+        let method_name = if let Some(s) = request_json["method"].as_string() {
+            s
+        } else {
+            return Err(HandlerError::InvalidRequest);
+        };
+
+        let method = match self.config.streams.get(method_name) {
+            Some(s) => s,
+            None => {
+                warn!("Requested method {} not found", method_name);
+                return Err(HandlerError::NoSuchMethod);
+            }
+        };
+
+        let arguments = match get_invoke_arguments(&method.exec_params, &params) {
+            Err(e) => {
+                error!("Error during retrieving arguments: {:?}", e);
+                return Err(HandlerError::InvalidRequest);
+            }
+            Ok(a) => a,
+        };
+        info!("Spawn child for {} with args: {:?}", method_name, arguments);
+
+        // todo: Detect when connection is killed and kill child process
+        if let Err(e) = Self::spawn_and_stream(method, &arguments, res) {
+            error!("Processing streamer request failed: {:?}", e);
+            return Err(HandlerError::InvalidRequest);
+        }
+
+        info!("Reading STDOUT finished");
+        Ok(())
+    }
 }
 
 impl Handler for SenderHandler {
-    fn handle(&self, req: Request, mut res: Response) {
+    fn handle(&self, mut req: Request, mut res: Response) {
         // Only support of POST
         info!("Processing request from {}. Method {}. Uri {}",
               req.remote_addr,
@@ -51,30 +110,50 @@ impl Handler for SenderHandler {
             *res.status_mut() = StatusCode::Unauthorized;
             return;
         }
-
+        // TODO: Unified handling for streaming and rpc request
         if req.method == hyper::Post {
             if let RequestUri::AbsolutePath(ref path) = req.uri.clone() {
                 let path = path as &str;
+                let mut lazy = LazyResponse::new(res);
+                let response;
                 if self.config.protocol_definition.stream_path == path {
-                    self.handle_streaming(req, res)
+                    response = self.handle_response(&mut req, &mut lazy);
                 } else if self.config.protocol_definition.rpc_path == path {
-                    self.handle_json_rpc(req, res)
+                    response = self.json_rpc.handle_response(&mut req, &mut lazy);
                 } else {
                     error!("Unknown request path: {}", path);
-                    *res.status_mut() = StatusCode::NotFound
+                    response = Err(HandlerError::NoSuchMethod);
+                }
+
+                match response {
+                    Ok(_) => {},
+                    Err(err) => {
+                        // Ok Some errors during processing
+                        match lazy {
+                            LazyResponse::Fresh(ref mut resp) => {
+                                //Set response code etc
+                                *resp.status_mut() = match err {
+                                    HandlerError::NoSuchMethod => StatusCode::NotFound,
+                                    HandlerError::InvalidRequest => StatusCode::BadRequest,
+                                };
+                            }
+                            LazyResponse::Streaming(_) => {
+                                warn!("Lazy response should be in FRESH state!");
+                            }
+                            LazyResponse::NONE => {
+                                unreachable!();
+                            }
+                        }
+                    }
+                }
+                if let Err(ref e) = lazy.end() {
+                    warn!("Closing lazy writer failed: {}", e);
                 }
             }
         } else {
             warn!("GET is not supported");
             *res.status_mut() = StatusCode::MethodNotAllowed;
         }
-    }
-}
-
-
-impl RpcHandler {
-    pub fn new(methods: HashMap<String, MethodDefinition>) -> RpcHandler {
-        RpcHandler { methods: methods }
     }
 }
 
@@ -114,78 +193,6 @@ impl SenderHandler {
         }
     }
 
-
-    fn handle_streaming(&self, mut req: Request, mut res: Response) {
-        // Read streaming method name from path
-        // POST /streaming
-        let mut request_str = String::new();
-        // TODO: Limit read size
-        if let Err(e) = req.read_to_string(&mut request_str) {
-            error!("Reading request failed {:?}", e);
-            *res.status_mut() = StatusCode::BadRequest;
-            return;
-        }
-        info!("--> {}", request_str);
-        let request_json = match Json::from_str(&request_str) {
-            Ok(s) => s,
-            Err(e) => {
-                error!("Invalid JSON request: {:?}", e);
-                *res.status_mut() = StatusCode::BadRequest;
-                return;
-            }
-        };
-        let empty = Json::Null;
-        let params = if let Some(j) = request_json.find("params") {
-            j
-        } else {
-            &empty
-        };
-
-        //let params = &request_json["params"];
-        let method_name = if let Some(s) = request_json["method"].as_string() {
-            s
-        } else {
-            *res.status_mut() = StatusCode::NotFound;
-            return;
-        };
-
-        let method = match self.config.streams.get(method_name) {
-            Some(s) => s,
-            None => {
-                warn!("Requested method {} not found", method_name);
-                *res.status_mut() = StatusCode::NotFound;
-                return;
-            }
-        };
-
-        let arguments = match get_invoke_arguments(&method.exec_params, &params) {
-            Err(e) => {
-                error!("Error during retrieving arguments: {:?}", e);
-                // In case of error terminate right away
-                *res.status_mut() = StatusCode::BadRequest;
-                return;
-            }
-            Ok(a) => a,
-        };
-        info!("Spawn child for {} with args: {:?}", method_name, arguments);
-        let mut streaming_response = match res.start() {
-            Ok(o) => o,
-            Err(e) => {
-                error!("Unable to obtain response stream: {:?}", e);
-                return;
-            }
-        };
-        // todo: Detect when connection is killed and kill child process
-        if let Err(e) = Self::spawn_and_stream(method, &arguments, &mut streaming_response) {
-            error!("Processing streamer request failed: {:?}", e);
-        }
-        if let Err(e) = streaming_response.end() {
-            error!("Closing response stream failed: {:?}", e);
-            return;
-        }
-        info!("Reading STDOUT finished")
-    }
-
     fn spawn_and_stream(method: &MethodDefinition,
                         arguments: &[String],
                         streaming_response: &mut Write)
@@ -219,102 +226,6 @@ impl SenderHandler {
         Ok(())
     }
 
-    fn handle_json_rpc(&self, mut req: Request, res: Response) {
-        // TODO: check required content type
-        let mut request = String::new();
-        if req.read_to_string(&mut request).is_err() {
-            warn!("Unable to read request");
-            return;
-        }
-        info!("Request: {}", request);
-        let response = self.json_rpc.handle_request(&request);
-        if let Some(response) = response {
-            info!("Response: {}", response);
-            if let Err(e) = res.send(&response.into_bytes()) {
-                error!("Error during sending response: {:?}", e);
-            }
-        }
-    }
-}
-
-fn get_invoke_arguments(exec_params: &Vec<MethodParam>, params: &Json) -> Result<Vec<String>, ()> {
-    let mut arguments = Vec::new();
-    for arg in exec_params {
-        match arg.unroll(&params) {
-            Ok(Some(s)) => arguments.push(s),
-            Err(_) => return Err(()),
-            // We dont care about Ok(None)
-            _ => {}
-        }
-    }
-    Ok(arguments)
-}
-
-impl jsonrpc::Handler for RpcHandler {
-    fn handle(&self, req: &JsonRpcRequest) -> Result<Json, ErrorJsonRpc> {
-        let method = if let Some(s) = self.methods.get(req.method) {
-            s
-        } else {
-            error!("Requested method '{}' not found!", req.method);
-            return Err(ErrorJsonRpc::new(ErrorCode::MethodNotFound));
-        };
-
-        // TODO: For now hackish solution
-        // Allow not only objects but also arrays
-        let params = if let Some(p) = req.params {
-            p.to_owned()
-        } else {
-            Json::Null
-        };
-        // prepare arguments
-        let arguments = if let Ok(ok) = get_invoke_arguments(&method.exec_params, &params) {
-            ok
-        } else {
-            error!("Invalid params for request");
-            return Err(ErrorJsonRpc::new(ErrorCode::InvalidParams));
-        };
-
-        info!("Method invoke with {:?}", arguments);
-
-        if let Some(ref fake_response) = method.use_fake_response {
-            // delayed response...
-            info!("Delayed command execution. Faking response {}",
-                  fake_response);
-            let path = method.path.clone();
-            let delay = method.delay * 1000;
-            thread::spawn(move || {
-                thread::sleep_ms(delay);
-                info!("Executing delayed ({}ms) command", delay);
-                match Command::new(&path).args(&arguments).output() {
-                    Ok(o) => {
-                        // Log as lossy utf8.
-                        // TODO: Limit output size? Eg cat on whole partition?
-                        info!("Execution finished\nStatus: {}\nStdout: {}\nStderr: {}\n",
-                              o.status,
-                              String::from_utf8_lossy(&o.stdout),
-                              String::from_utf8_lossy(&o.stderr));
-                    }
-                    Err(e) => info!("Failed to execute process: {}", e),
-                }
-            });
-            //This method support only utf-8 (we just spit whole json from config...)
-            return Ok(fake_response.clone());
-        } else {
-            //Encode to baseXY?
-            let output = Command::new(&method.path)
-                             .args(&arguments)
-                             .output()
-                             .map(|o| {
-                                 if method.response_encoding == ResponseEncoding::Utf8 {
-                                    String::from_utf8_lossy(&o.stdout).to_json()
-                                 } else {
-                                    o.stdout.to_base64(STANDARD).to_json()
-                                 }
-                             })
-                             .map_err(|_| ErrorJsonRpc::new(ErrorCode::InvalidParams));
-            return output;
-        }
-    }
 }
 
 /**
