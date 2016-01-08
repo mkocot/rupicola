@@ -1,3 +1,5 @@
+#![feature(ip)]
+
 // Local files/dependencies
 mod config;
 mod params;
@@ -37,7 +39,7 @@ struct SenderHandler {
 }
 
 impl ResponseHandler for SenderHandler {
-    fn handle_response(&self, req: &mut Read, res: &mut Write) -> Result<(), HandlerError> {
+    fn handle_response(&self, req: &mut Read, res: &mut Write, is_auth: bool) -> Result<(), HandlerError> {
         // Read streaming method name from path
         // POST /streaming
         let mut request_str = String::new();
@@ -76,6 +78,12 @@ impl ResponseHandler for SenderHandler {
             }
         };
 
+        //check for provate ones
+        if !method.is_private && !is_auth {
+            warn!("Invoking method requires auth!");
+            return Err(HandlerError::Unauthorized);
+        }
+
         let arguments = match get_invoke_arguments(&method.exec_params, &params) {
             Err(e) => {
                 error!("Error during retrieving arguments: {:?}", e);
@@ -103,23 +111,36 @@ impl Handler for SenderHandler {
               req.remote_addr,
               req.method,
               req.uri);
+        // if request is from loopback and requested method is private
+        // skip this check
+        let is_authorized = self.is_request_authorized(&req);
+        let is_loopback = match req.remote_addr {
+            std::net::SocketAddr::V4(addr) => addr.ip().is_loopback(),
+            std::net::SocketAddr::V6(addr) => addr.ip().is_loopback(),
+        };
 
-        if !self.is_request_authorized(&req) {
+        if is_loopback {
+            info!("Response from loopback");
+        }
+
+        // Enable this check early for normal requests
+        // TODO: This almos repeat what is below in response
+        if !is_loopback && !is_authorized {
             // TODO: is there build-in for this?
             res.headers_mut().set_raw("WWW-Authenticate", vec![b"Basic".to_vec()]);
             *res.status_mut() = StatusCode::Unauthorized;
             return;
         }
-        // TODO: Unified handling for streaming and rpc request
+
         if req.method == hyper::Post {
             if let RequestUri::AbsolutePath(ref path) = req.uri.clone() {
                 let path = path as &str;
                 let mut lazy = LazyResponse::new(res);
                 let response;
                 if self.config.protocol_definition.stream_path == path {
-                    response = self.handle_response(&mut req, &mut lazy);
+                    response = self.handle_response(&mut req, &mut lazy, is_authorized);
                 } else if self.config.protocol_definition.rpc_path == path {
-                    response = self.json_rpc.handle_response(&mut req, &mut lazy);
+                    response = self.json_rpc.handle_response(&mut req, &mut lazy, is_authorized);
                 } else {
                     error!("Unknown request path: {}", path);
                     response = Err(HandlerError::NoSuchMethod);
@@ -135,7 +156,13 @@ impl Handler for SenderHandler {
                                 *resp.status_mut() = match err {
                                     HandlerError::NoSuchMethod => StatusCode::NotFound,
                                     HandlerError::InvalidRequest => StatusCode::BadRequest,
+                                    HandlerError::Unauthorized => StatusCode::Unauthorized
                                 };
+
+                                if !is_authorized || resp.status() == StatusCode::Unauthorized {
+                                    resp.headers_mut().set_raw("WWW-Authenticate", vec![b"Basic".to_vec()]);
+                                    *resp.status_mut() = StatusCode::Unauthorized;
+                                }
                             }
                             LazyResponse::Streaming(_) => {
                                 warn!("Lazy response should be in FRESH state!");
@@ -151,6 +178,7 @@ impl Handler for SenderHandler {
                 }
             }
         } else {
+            //TODO: Send request for WWW-Authenticate if false?
             warn!("GET is not supported");
             *res.status_mut() = StatusCode::MethodNotAllowed;
         }

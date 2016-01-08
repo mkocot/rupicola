@@ -102,6 +102,7 @@ pub struct MethodDefinition {
     /// Delayed execution in seconds
     pub delay: u32,
     pub response_encoding: ResponseEncoding,
+    pub is_private: bool,
 }
 
 
@@ -120,11 +121,32 @@ pub enum ParameterType {
     Number,
 }
 
+impl ParameterType {
+    pub fn convert(&self, val: &Json) -> Result<Option<String>, ()> {
+        match *val {
+            Json::String(ref s) if *self == ParameterType::String => Ok(Some(s.to_owned())),
+            Json::I64(ref i) if *self == ParameterType::Number => Ok(Some(i.to_string())),
+            Json::U64(ref i) if *self == ParameterType::Number => Ok(Some(i.to_string())),
+            Json::F64(ref i) if *self == ParameterType::Number => Ok(Some(i.to_string())),
+            _ => Err(())
+        }
+    }
+
+    pub fn convert_yaml(&self, val: &Yaml) -> Result<Option<String>, ()> {
+        match *val {
+            Yaml::Real(ref r) if *self == ParameterType::Number => Ok(Some(r.to_owned())),
+            Yaml::Integer(ref i) if *self == ParameterType::Number => Ok(Some(i.to_string())),
+            _ => Err(())
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct ParameterDefinition {
     pub name: String,
     pub optional: bool,
     pub param_type: ParameterType,
+    pub default: Option<String>,
 }
 
 struct SimpleLogger;
@@ -499,9 +521,7 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>,
                     error!("Used restricted keyword 'self'. Ignoring.");
                     continue;
                 }
-                // optional
                 let optional = definition_it["optional"].as_bool().unwrap_or(false);
-                // hmm reguired..
                 let param_type = match definition_it["type"].as_str().unwrap_or("") {
                     "string" => ParameterType::String,
                     "number" => ParameterType::Number,
@@ -510,10 +530,22 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>,
                         continue;
                     }
                 };
+                let default_from_settings = &definition_it["default"];
+                let default = if let Ok(conv) = param_type.convert_yaml(&default_from_settings) {
+                    conv
+                } else {
+                    if !default_from_settings.is_badvalue() {
+                        error!("Provided default value {:?} cannot be converted to {:?}", default_from_settings, param_type);
+                    }
+                    None
+                };
+
+                // TODO: Handle default value for optional parameter
                 let definition = ParameterDefinition {
                     param_type: param_type,
                     name: name.clone(),
                     optional: optional,
+                    default: default,
                 };
                 parameters.insert(name, Arc::new(definition));
             }
@@ -540,6 +572,8 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>,
         } else {
             None
         };
+
+        let is_private = method_def["private"].as_bool().unwrap_or(false);
 
         //This is a bug? Sometimes rustc cant handle &String to &str conversion
         let response_encoding = match &method_def["encoding"].as_str()
@@ -572,6 +606,7 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>,
             use_fake_response: fake_response,
             delay: delay,
             response_encoding: response_encoding,
+            is_private: is_private,
         };
 
         info!("Registered method: {}. Support streaming: {}", name, streamed);

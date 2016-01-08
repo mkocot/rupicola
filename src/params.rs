@@ -1,7 +1,7 @@
 extern crate rustc_serialize;
 
 use rustc_serialize::json::{ToJson, Json};
-use config::{ParameterDefinition, ParameterType};
+use config::ParameterDefinition;
 use std::sync::Arc;
 
 #[derive(Debug, Clone)]
@@ -15,7 +15,6 @@ pub enum MethodParam {
     /// Capture all params as one-line json string
     Everything,
 }
-
 //Helper trait for cleaner implementation
 pub trait Unroll {
     fn unroll(&self, params: &Json) -> Result<Option<String>, ()>;
@@ -26,26 +25,29 @@ impl Unroll for ParameterDefinition {
         // get info from params
         // for now variables support only objects
         match params.find(&self.name as &str) {
-            Some(&Json::String(ref s)) if self.param_type == ParameterType::String => {
-                Ok(Some(s.to_owned()))
-            }
-            Some(&Json::I64(ref i)) if self.param_type == ParameterType::Number => {
-                Ok(Some(i.to_string()))
-            }
-            Some(&Json::U64(ref i)) if self.param_type == ParameterType::Number => {
-                Ok(Some(i.to_string()))
-            }
-            Some(&Json::F64(ref s)) if self.param_type == ParameterType::Number => {
-                Ok(Some(s.to_string()))
-            }
-            // Meh
+            //Some(&Json::String(ref s)) if self.param_type == ParameterType::String => {
+            //    Ok(Some(s.to_owned()))
+            //}
+            //Some(&Json::I64(ref i)) if self.param_type == ParameterType::Number => {
+            //    Ok(Some(i.to_string()))
+            //}
+            //Some(&Json::U64(ref i)) if self.param_type == ParameterType::Number => {
+            //    Ok(Some(i.to_string()))
+            //}
+            //Some(&Json::F64(ref s)) if self.param_type == ParameterType::Number => {
+            //    Ok(Some(s.to_string()))
+            //}
             Some(ref s) => {
-                error!("Unable to convert. Value = {:?}; target type = {:?}", s, self);
-                Err(())
+                let conversion_result = self.param_type.convert(s);
+                if conversion_result.is_err() {
+                    error!("Unable to convert. Value = {:?}; target type = {:?}", s, self);
+                }
+                conversion_result
             }
             None => {
                 if self.optional {
-                    Ok(None)
+                    // Just wrap default value
+                    Ok(self.default.clone())
                 } else {
                     error!("Missing required param {:?}", self.name);
                     Err(())
