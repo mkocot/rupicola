@@ -11,6 +11,7 @@ mod rpc;
 #[macro_use]
 extern crate clap;
 extern crate hyper;
+extern crate hyperlocal;
 extern crate jsonrpc;
 #[macro_use]
 extern crate log;
@@ -24,6 +25,7 @@ use hyper::server::{Server, Request, Response, Handler};
 use hyper::uri::RequestUri;
 use hyper::net::Openssl;
 use hyper::header::{Authorization, Basic};
+use hyperlocal::UnixSocketServer;
 use jsonrpc::JsonRpcServer;
 use rustc_serialize::json::Json;
 use std::io::{Read, Write};
@@ -115,7 +117,11 @@ impl Handler for SenderHandler {
         // skip this check
         let is_authorized = self.is_request_authorized(&req);
         let is_loopback = match req.remote_addr {
-            std::net::SocketAddr::V4(addr) => addr.ip().is_loopback(),
+            std::net::SocketAddr::V4(addr) => {
+                // Special case: 0.0.0.0:0 -> Unix domain socket
+                // Check for 0.0.0.0 is done by 'is_unspecified'
+                addr.port() == 0 && addr.ip().is_unspecified() || addr.ip().is_loopback()
+            },
             std::net::SocketAddr::V6(addr) => addr.ip().is_loopback(),
         };
 
@@ -278,6 +284,12 @@ fn main() {
         }
         Protocol::Http { ref address, ref port } => {
             Server::http((address as &str, *port))
+                .unwrap()
+                .handle(SenderHandler::new(config))
+                .unwrap();
+        }
+        Protocol::Unix { ref address } => {
+            UnixSocketServer::new(address)
                 .unwrap()
                 .handle(SenderHandler::new(config))
                 .unwrap();

@@ -69,6 +69,10 @@ pub enum Protocol {
         cert: String,
         key: String,
     },
+
+    Unix {
+        address: String,
+    },
 }
 
 pub struct ProtocolDefinition {
@@ -211,8 +215,13 @@ impl ServerConfig {
                     info!("Port: {}", port);
                     port as u16
                 } else {
-                    error!("No port defined!");
-                    return Err(());
+                    // This is error only if protocol is != Unix
+                    if protocol_type != "unix" {
+                        error!("No port defined!");
+                        return Err(());
+                    }
+                    // just return "random" value it will never be used anyway
+                    0
                 };
 
                 info!("Protocol type: {}", protocol_type);
@@ -230,11 +239,18 @@ impl ServerConfig {
                             cert: cert.unwrap(),
                         };
                     }
-                } else {
+                } else if protocol_type == "http" {
                     protocol = Protocol::Http {
                         address: address,
                         port: port,
                     };
+                } else if protocol_type == "unix" {
+                    protocol = Protocol::Unix {
+                        address: address,
+                    };
+                } else {
+                    error!("Invalid protocol type '{}'!", protocol_type);
+                    return Err(());
                 }
             } else {
                 error!("No protocol type! Using HTTP");
@@ -540,7 +556,6 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>,
                     None
                 };
 
-                // TODO: Handle default value for optional parameter
                 let definition = ParameterDefinition {
                     param_type: param_type,
                     name: name.clone(),
