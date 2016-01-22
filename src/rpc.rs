@@ -102,15 +102,30 @@ impl Handler for RpcHandler {
 
             let output = command.output()
                     .map(|o| {
+                        // Convert from Cow do String or from String to Cow?
                         if method.response_encoding == ResponseEncoding::Utf8 {
-                            String::from_utf8_lossy(&o.stdout).to_json()
+                            String::from_utf8_lossy(&o.stdout).into_owned()
                         } else {
-                            o.stdout.to_base64(STANDARD).to_json()
+                            o.stdout.to_base64(STANDARD)
                         }
                     })
                     .map_err(|e|{
                         error!("Failed to start command: {}", e);
                         ErrorJsonRpc::new(ErrorCode::ServerError(-32001, "Subprocedure failed to run"))
+                    })
+                    .and_then(|o| {
+                        //map to error or success now
+                        if method.output == OutputEncoding::Json {
+                            match Json::from_str(&o) {
+                                Ok(json) => Ok(json),
+                                Err(e) => {
+                                    error!("Conversion to JSON failed! Error: {:?}", e);
+                                    Err(ErrorJsonRpc::new(ErrorCode::ServerError(-32003, "Output conversion failed")))
+                                }
+                            }
+                        } else {
+                            Ok(o.to_json())
+                        }
                     });
             return output;
         }

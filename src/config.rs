@@ -124,6 +124,12 @@ pub enum RunAs {
     Custom { gid: gid_t, uid: uid_t}
 }
 
+#[derive(Clone, PartialEq)]
+pub enum OutputEncoding {
+    Text,
+    Json
+}
+
 #[derive(Clone)]
 pub struct MethodDefinition {
     pub name: String,
@@ -137,6 +143,7 @@ pub struct MethodDefinition {
     pub is_private: bool,
     pub limits: Arc<Limits>,
     pub run_as: RunAs,
+    pub output: OutputEncoding,
 }
 
 
@@ -686,6 +693,21 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>,
             RunAs::Default
         };
 
+        let output_encoding_node = method_def["output"]["format"].as_str();
+        // Note: If encoding is base64 disable converting to JSON
+        let output_encoding = output_encoding_node.map(|format| {
+            if format == "json" {
+                if response_encoding == ResponseEncoding::Utf8 {
+                    OutputEncoding::Json
+                } else {
+                    warn!("Specified JSON encoding for output encoding that is not UTF-8! Fallback to TEXT");
+                    OutputEncoding::Text
+                }
+            } else {
+                OutputEncoding::Text
+            }
+        }).unwrap_or(OutputEncoding::Text);
+        
         let method_definition = MethodDefinition {
             name: name.to_owned(),
             path: path.to_owned(),
@@ -699,6 +721,7 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>,
             is_private: is_private,
             limits: method_limits,
             run_as: run_as,
+            output: output_encoding,
         };
 
         info!("Registered method: {}. Support streaming: {}", name, streamed);
