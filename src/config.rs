@@ -75,6 +75,25 @@ pub enum Protocol {
     },
 }
 
+#[derive(Clone)]
+pub struct Limits {
+    pub read_timeout: u32,
+    pub exec_timeout: u32,
+    pub payload_size: u32,
+    pub max_response: u32
+}
+
+impl Limits {
+    pub fn new() -> Limits {
+        Limits {
+            read_timeout: 10000,
+            exec_timeout: 0,
+            payload_size: 5242880,
+            max_response: 5242880,
+        }
+    }
+}
+
 pub struct ProtocolDefinition {
     pub protocol: Protocol,
     pub auth: AuthMethod,
@@ -87,6 +106,9 @@ pub struct ServerConfig {
     pub methods: HashMap<String, MethodDefinition>,
     pub streams: HashMap<String, MethodDefinition>,
     pub log_level: log::LogLevelFilter,
+    // Arc to allow easy sharint this among
+    // method definition
+    pub default_limits: Arc<Limits>,
 }
 
 #[derive(Clone, PartialEq)]
@@ -107,6 +129,7 @@ pub struct MethodDefinition {
     pub delay: u32,
     pub response_encoding: ResponseEncoding,
     pub is_private: bool,
+    pub limits: Arc<Limits>,
 }
 
 
@@ -193,8 +216,10 @@ impl ServerConfig {
             methods: HashMap::new(),
             streams: HashMap::new(),
             log_level: log::LogLevelFilter::Info,
+            default_limits: Arc::new(Limits::new()),
         }
     }
+
 
     pub fn parse_protocol_definition(config: &Yaml) -> Result<ProtocolDefinition, ()> {
         let protocol_definition = &config["protocol"];
@@ -298,11 +323,12 @@ impl ServerConfig {
             error!("No protocol field!");
             return Err(());
         }
+        // Parse limits
         let proto_def = ProtocolDefinition {
             protocol: protocol,
             auth: auth,
-            rpc_path: config["rpc"].as_str().unwrap_or("/jsonrpc").to_owned(),
-            stream_path: config["streamed"].as_str().unwrap_or("/streaming").to_owned(),
+            rpc_path: config["uri"]["rpc"].as_str().unwrap_or("/jsonrpc").to_owned(),
+            stream_path: config["uri"]["streamed"].as_str().unwrap_or("/streaming").to_owned(),
         };
         info!("Path for RPC: {}", proto_def.rpc_path);
         info!("Path for Stream: {}", proto_def.stream_path);
@@ -345,10 +371,20 @@ impl ServerConfig {
         if let Some(methods) = config_yaml["methods"].as_hash() {
             parse_methods(methods,
                           &mut server_config.methods,
-                          &mut server_config.streams);
+                          &mut server_config.streams,
+                          &server_config.default_limits);
         }
 
         server_config
+    }
+}
+
+fn parse_limits(node: &Yaml, proto: &Limits) -> Limits {
+    Limits {
+        read_timeout: node["read-timeout"].as_i64().map(|i|i as u32).unwrap_or(proto.read_timeout),
+        exec_timeout: node["exec-timeout"].as_i64().map(|i|i as u32).unwrap_or(proto.exec_timeout),
+        payload_size: node["payload-size"].as_i64().map(|i|i as u32).unwrap_or(proto.payload_size),
+        max_response: node["max_response"].as_i64().map(|i|i as u32).unwrap_or(proto.max_response),
     }
 }
 
@@ -485,7 +521,8 @@ fn parse_param(exec_param: &Yaml,
 
 fn parse_methods(methods: &BTreeMap<Yaml, Yaml>,
                  rpc_config_methods: &mut HashMap<String, MethodDefinition>,
-                 str_config_methods: &mut HashMap<String, MethodDefinition>) {
+                 str_config_methods: &mut HashMap<String, MethodDefinition>,
+                 default_limits: &Arc<Limits>) {
     for (method_name, method_def) in methods {
         // Name method MUST be string
         let name = match method_name.as_str() {
@@ -611,6 +648,14 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>,
             warn!("[{}]: Encoding is ignored for streaming mode", name);
         }
 
+        // Do new limits object or reuse default one
+        let limits_node = &method_def["limits"];
+        let method_limits = if limits_node.as_hash().is_some() {
+            Arc::new(parse_limits(limits_node, &default_limits))
+        } else {
+            default_limits.clone()
+        };
+
         let method_definition = MethodDefinition {
             name: name.to_owned(),
             path: path.to_owned(),
@@ -622,6 +667,7 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>,
             delay: delay,
             response_encoding: response_encoding,
             is_private: is_private,
+            limits: method_limits,
         };
 
         info!("Registered method: {}. Support streaming: {}", name, streamed);

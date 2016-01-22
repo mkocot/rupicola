@@ -22,18 +22,20 @@ impl RpcHandler {
 }
 
 impl Handler for RpcHandler {
-    fn handle(&self, req: &JsonRpcRequest, custom: &HashMap<&str, Json>) -> Result<Json, ErrorJsonRpc> {
+    fn handle(&self,
+              req: &JsonRpcRequest,
+              custom: &HashMap<&str, Json>) -> Result<Json, ErrorJsonRpc> {
         let method = if let Some(s) = self.methods.get(req.method) {
             s
         } else {
-            error!("Requested method '{}' not found!", req.method);
+            error!("[{}] No such method!", req.method);
             return Err(ErrorJsonRpc::new(ErrorCode::MethodNotFound));
         };
-        // TODO: Check if (!private && !auth)
-        // Anyway this is unable to send back info about unauthorized request
+
         let is_auth = custom["is_auth"].as_boolean().unwrap_or(false);
         if !is_auth && !method.is_private {
-            error!("You shall not pass");
+            error!("[{}] Invoking public method without authorization!",
+                   req.method);
             return Err(ErrorJsonRpc::new(ErrorCode::ServerError(-32000, "Unauthorized")));
         }
         // TODO: For now hackish solution
@@ -47,16 +49,16 @@ impl Handler for RpcHandler {
         let arguments = if let Ok(ok) = get_invoke_arguments(&method.exec_params, &params) {
             ok
         } else {
-            error!("Invalid params for request");
+            error!("[{}] Invalid params for request", req.method);
             return Err(ErrorJsonRpc::new(ErrorCode::InvalidParams));
         };
 
-        info!("Method invoke with {:?}", arguments);
+        info!("[{}] Method invoke with {:?}", req.method, arguments);
 
         if let Some(ref fake_response) = method.use_fake_response {
             // delayed response...
-            info!("Delayed command execution. Faking response {}",
-                  fake_response);
+            info!("[{}] Delayed command execution. Faking response {}",
+                  req.method, fake_response);
             let path = method.path.clone();
             let delay = method.delay as u64;
             thread::spawn(move || {
@@ -94,7 +96,8 @@ impl Handler for RpcHandler {
     }
 }
 
-pub fn get_invoke_arguments(exec_params: &Vec<MethodParam>, params: &Json) -> Result<Vec<String>, ()> {
+pub fn get_invoke_arguments(exec_params: &Vec<MethodParam>,
+                            params: &Json) -> Result<Vec<String>, ()> {
     let mut arguments = Vec::new();
     for arg in exec_params {
         match arg.unroll(&params) {
@@ -108,14 +111,17 @@ pub fn get_invoke_arguments(exec_params: &Vec<MethodParam>, params: &Json) -> Re
 }
 
 impl ResponseHandler for JsonRpcServer<RpcHandler> {
-    fn handle_response(&self, req: &mut Read, res: &mut Write, is_auth: bool) -> Result<(), HandlerError> {
+    fn handle_response(&self,
+                       req: &mut Read,
+                       res: &mut Write,
+                       is_auth: bool) -> Result<(), HandlerError> {
         // TODO: check required content type
         let mut request = String::new();
         if req.read_to_string(&mut request).is_err() {
             warn!("Unable to read request");
             return Err(HandlerError::InvalidRequest);
         }
-        info!("Request: {}", request);
+        info!("Processing request: {}", request);
         let mut custom_data = HashMap::new();
         custom_data.insert("is_auth", is_auth.to_json());
         let response = self.handle_request_custom(&request, Some(&custom_data));

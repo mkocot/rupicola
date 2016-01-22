@@ -147,6 +147,17 @@ impl Handler for SenderHandler {
         }
 
         if let RequestUri::AbsolutePath(ref path) = req.uri.clone() {
+            // 1) Check payload size in header
+            // this is sufficient as hyper relies on that
+            if let Some(&hyper::header::ContentLength(size)) = req.headers.get::<hyper::header::ContentLength>() {
+                if size > self.config.default_limits.payload_size as u64 {
+                    error!("Request is too big! ({} > {})",
+                            size, self.config.default_limits.payload_size);
+                }
+            } else {
+                error!("Required header: ContentLength is missing!");
+            }
+
             let path = path as &str;
             let mut lazy = LazyResponse::new(res);
             let response = if self.config.protocol_definition.stream_path == path {
