@@ -41,7 +41,10 @@ struct SenderHandler {
 }
 
 impl ResponseHandler for SenderHandler {
-    fn handle_response(&self, req: &mut Read, res: &mut Write, is_auth: bool) -> Result<(), HandlerError> {
+    fn handle_response(&self,
+                       req: &mut Read,
+                       res: &mut Write,
+                       is_auth: bool) -> Result<(), HandlerError> {
         // Read streaming method name from path
         // POST /streaming
         let mut request_str = String::new();
@@ -138,56 +141,55 @@ impl Handler for SenderHandler {
             return;
         }
 
-        if req.method == hyper::Post {
-            if let RequestUri::AbsolutePath(ref path) = req.uri.clone() {
-                let path = path as &str;
-                let mut lazy = LazyResponse::new(res);
-                let response;
-                if self.config.protocol_definition.stream_path == path {
-                    response = self.handle_response(&mut req, &mut lazy, is_authorized);
-                } else if self.config.protocol_definition.rpc_path == path {
-                    response = self.json_rpc.handle_response(&mut req, &mut lazy, is_authorized);
-                } else {
-                    error!("Unknown request path: {}", path);
-                    response = Err(HandlerError::NoSuchMethod);
-                }
-
-                match response {
-                    Ok(_) => {},
-                    Err(err) => {
-                        // Ok Some errors during processing
-                        match lazy {
-                            LazyResponse::Fresh(ref mut resp) => {
-                                //Set response code etc
-                                *resp.status_mut() = match err {
-                                    HandlerError::NoSuchMethod => StatusCode::NotFound,
-                                    HandlerError::InvalidRequest => StatusCode::BadRequest,
-                                    HandlerError::Unauthorized => StatusCode::Unauthorized
-                                };
-
-                                if !is_authorized || resp.status() == StatusCode::Unauthorized {
-                                    resp.headers_mut().set_raw("WWW-Authenticate", vec![b"Basic".to_vec()]);
-                                    *resp.status_mut() = StatusCode::Unauthorized;
-                                }
-                            }
-                            LazyResponse::Streaming(_) => {
-                                warn!("Lazy response should be in FRESH state!");
-                            }
-                            LazyResponse::NONE => {
-                                unreachable!();
-                            }
-                        }
-                    }
-                }
-                if let Err(ref e) = lazy.end() {
-                    warn!("Closing lazy writer failed: {}", e);
-                }
-            }
-        } else {
-            //TODO: Send request for WWW-Authenticate if false?
-            warn!("GET is not supported");
+        if req.method != hyper::Post {
+            warn!("{:?} is not supported", req.method);
             *res.status_mut() = StatusCode::MethodNotAllowed;
         }
+
+        if let RequestUri::AbsolutePath(ref path) = req.uri.clone() {
+            let path = path as &str;
+            let mut lazy = LazyResponse::new(res);
+            let response = if self.config.protocol_definition.stream_path == path {
+                self.handle_response(&mut req, &mut lazy, is_authorized)
+            } else if self.config.protocol_definition.rpc_path == path {
+                lazy.enable_buffer();
+                self.json_rpc.handle_response(&mut req, &mut lazy, is_authorized)
+            } else {
+                error!("Unknown request path: {}", path);
+                Err(HandlerError::NoSuchMethod)
+            };
+
+            if let Err(err) = response {
+                // Ok Some errors during processing
+                match lazy {
+                    LazyResponse::Fresh(ref mut resp, _) => {
+                        //Set response code etc
+                        *resp.status_mut() = match err {
+                            HandlerError::NoSuchMethod => StatusCode::NotFound,
+                            HandlerError::InvalidRequest => StatusCode::BadRequest,
+                            HandlerError::Unauthorized => StatusCode::Unauthorized
+                        };
+
+                        if !is_authorized || resp.status() == StatusCode::Unauthorized {
+                            resp.headers_mut().set_raw("WWW-Authenticate",
+                                                       vec![b"Basic".to_vec()]);
+                            *resp.status_mut() = StatusCode::Unauthorized;
+                        }
+                    }
+                    LazyResponse::Streaming(_) => {
+                        warn!("Lazy response should be in FRESH state!");
+                    }
+                    LazyResponse::NONE => {
+                        unreachable!();
+                    }
+                }
+            }
+
+            if let Err(ref e) = lazy.end() {
+                warn!("Closing lazy writer failed: {}", e);
+            }
+        }
+    
     }
 }
 
