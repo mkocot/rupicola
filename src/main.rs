@@ -30,6 +30,7 @@ use jsonrpc::JsonRpcServer;
 use rustc_serialize::json::Json;
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
+use std::os::unix::process::CommandExt;
 
 use lazy_response::LazyResponse;
 use rpc::{RpcHandler, get_invoke_arguments};
@@ -240,15 +241,22 @@ impl SenderHandler {
         }
     }
 
+
     fn spawn_and_stream(method: &MethodDefinition,
                         arguments: &[String],
                         streaming_response: &mut Write)
                         -> std::io::Result<()> {
         // Spawn child object
-        let mut child_process = try!(Command::new(&method.path)
-                                         .args(&arguments)
-                                         .stdout(Stdio::piped())
-                                         .spawn());
+        let mut base_command = Command::new(&method.path);
+        let command = {
+            if let RunAs::Custom { gid, uid } = method.run_as {
+                base_command.gid(gid).uid(uid)
+            } else {
+                &mut base_command
+            }}
+            .args(&arguments).stdout(Stdio::piped());
+
+        let mut child_process = try!(command.spawn());
 
         // Pipe stdout
         let mut reader = if let Some(s) = child_process.stdout {
