@@ -16,6 +16,7 @@ use std::collections::{HashMap, BTreeMap};
 use std::fs::File;
 use log::{LogRecord, LogLevelFilter, LogMetadata};
 use params::MethodParam;
+use std::os::unix::raw::{gid_t, uid_t};
 
 // Why FFS self::crypto?!
 use self::crypto::digest::Digest;
@@ -118,10 +119,15 @@ pub enum ResponseEncoding {
 }
 
 #[derive(Clone)]
+pub enum RunAs {
+    Default,
+    Custom { gid: gid_t, uid: uid_t}
+}
+
+#[derive(Clone)]
 pub struct MethodDefinition {
     pub name: String,
     pub path: String,
-    // how parse request
     pub exec_params: Vec<MethodParam>,
     pub variables: HashMap<String, Arc<ParameterDefinition>>,
     pub use_fake_response: Option<Json>,
@@ -130,6 +136,7 @@ pub struct MethodDefinition {
     pub response_encoding: ResponseEncoding,
     pub is_private: bool,
     pub limits: Arc<Limits>,
+    pub run_as: RunAs,
 }
 
 
@@ -588,7 +595,8 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>,
                     conv
                 } else {
                     if !default_from_settings.is_badvalue() {
-                        error!("Provided default value {:?} cannot be converted to {:?}", default_from_settings, param_type);
+                        error!("Provided default value {:?} cannot be converted to {:?}",
+                               default_from_settings, param_type);
                     }
                     None
                 };
@@ -655,6 +663,28 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>,
         } else {
             default_limits.clone()
         };
+        let run_as_node = &method_def["run-as"];
+        let run_as = if run_as_node.as_hash().is_some() {
+            let gid = if let Some(gid) = run_as_node["gid"].as_i64() {
+                gid as gid_t
+            } else {
+                warn!("[{}]: Invalid gid", name);
+                continue;
+            };
+
+            let uid = if let Some(uid) = run_as_node["uid"].as_i64() {
+                uid as gid_t
+            } else {
+                warn!("[{}]: Invalid uid", name);
+                continue;
+            };
+            info!("[{}]: Using permission: GID: {} UID: {}", name, gid, uid);
+            // Check if user exists?
+            RunAs::Custom { gid: gid, uid: uid }
+        } else {
+            debug!("[{}]: Using server UID/GID for execution", name);
+            RunAs::Default
+        };
 
         let method_definition = MethodDefinition {
             name: name.to_owned(),
@@ -668,6 +698,7 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>,
             response_encoding: response_encoding,
             is_private: is_private,
             limits: method_limits,
+            run_as: run_as,
         };
 
         info!("Registered method: {}. Support streaming: {}", name, streamed);

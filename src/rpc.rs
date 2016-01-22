@@ -10,6 +10,7 @@ use std::collections::HashMap;
 use params::{Unroll, MethodParam};
 use handlers::{ResponseHandler, HandlerError};
 use std::io::{Read, Write};
+use std::os::unix::process::CommandExt;
 
 pub struct RpcHandler {
     methods: HashMap<String, MethodDefinition>,
@@ -54,17 +55,27 @@ impl Handler for RpcHandler {
         };
 
         info!("[{}] Method invoke with {:?}", req.method, arguments);
-
         if let Some(ref fake_response) = method.use_fake_response {
             // delayed response...
             info!("[{}] Delayed command execution. Faking response {}",
                   req.method, fake_response);
-            let path = method.path.clone();
             let delay = method.delay as u64;
+            let run_as = method.run_as.clone();
+            let path = method.path.clone();
             thread::spawn(move || {
                 thread::sleep(Duration::new(delay, 0));
                 info!("Executing delayed ({}ms) command", delay);
-                match Command::new(&path).args(&arguments).output() {
+
+                let mut base_command = Command::new(&path);
+                let command = {
+                    if let RunAs::Custom { gid, uid } = run_as {
+                        base_command.gid(gid).uid(uid)
+                    } else {
+                        &mut base_command
+                    }}
+                    .args(&arguments);
+
+                match command.output() {
                     Ok(o) => {
                         // Log as lossy utf8.
                         // TODO: Limit output size? Eg cat on whole partition?
@@ -80,9 +91,16 @@ impl Handler for RpcHandler {
             return Ok(fake_response.clone());
         } else {
             //Encode to baseXY?
-            let output = Command::new(&method.path)
-                    .args(&arguments)
-                    .output()
+            let mut base_command = Command::new(&method.path);
+            let command = {
+                if let RunAs::Custom { gid, uid } = method.run_as {
+                    base_command.gid(gid).uid(uid)
+                } else {
+                    &mut base_command
+                }}
+                .args(&arguments);
+
+            let output = command.output()
                     .map(|o| {
                         if method.response_encoding == ResponseEncoding::Utf8 {
                             String::from_utf8_lossy(&o.stdout).to_json()
@@ -90,7 +108,10 @@ impl Handler for RpcHandler {
                             o.stdout.to_base64(STANDARD).to_json()
                         }
                     })
-                    .map_err(|_| ErrorJsonRpc::new(ErrorCode::ServerError(-32001, "Subprocedure failed to run")));
+                    .map_err(|e|{
+                        error!("Failed to start command: {}", e);
+                        ErrorJsonRpc::new(ErrorCode::ServerError(-32001, "Subprocedure failed to run"))
+                    });
             return output;
         }
     }
