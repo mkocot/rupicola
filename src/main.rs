@@ -8,8 +8,7 @@ mod lazy_response;
 mod rpc;
 
 // External dependencies
-#[macro_use]
-extern crate clap;
+extern crate getopts;
 extern crate hyper;
 extern crate hyperlocal;
 extern crate jsonrpc;
@@ -18,7 +17,6 @@ extern crate log;
 extern crate rustc_serialize;
 extern crate yaml_rust;
 
-use clap::App;
 use config::*;
 use hyper::status::StatusCode;
 use hyper::server::{Server, Request, Response, Handler};
@@ -31,6 +29,8 @@ use rustc_serialize::json::Json;
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 use std::os::unix::process::CommandExt;
+use std::env;
+use getopts::Options;
 
 use lazy_response::LazyResponse;
 use rpc::{RpcHandler, get_invoke_arguments};
@@ -287,11 +287,27 @@ impl SenderHandler {
  * Main entry point
  * */
 fn main() {
-    let yml = load_yaml!("app.yml");
-    let m = App::from_yaml(yml).get_matches();
-
-    let config_file = m.value_of("config").unwrap_or("/etc/jsonrpcd/jsonrpcd.conf");
-    let config = ServerConfig::read_from_file(config_file);
+    let args: Vec<String> = env::args().collect();
+    let program = args[0].clone();
+    let mut opts = Options::new();
+    opts.optopt("c", "config", "Set config file", "CONFIG");
+    opts.optflag("h", "help", "Print this help menu");
+    opts.optflag("v", "version", "Print program version");
+    let matches = match opts.parse(&args[1..]) {
+        Ok(m) => m,
+        Err(e) => panic!(e.to_string())
+    };
+    if matches.opt_present("h") {
+        let brief = format!("Simple RPC daemon with streaming.\nUsage: {} [options]", program);
+        print!("{}", opts.usage(&brief));
+        return;
+    }
+    if matches.opt_present("v") {
+        print!("0.1.0");
+        return;
+    }
+    let config_file = matches.opt_str("c").unwrap_or("/etc/jsonrpcd/jsonrpcd.conf".to_owned());
+    let config = ServerConfig::read_from_file(&config_file);
     // set_log_level(config.log_level);
     match config.protocol_definition.protocol.clone() {
         Protocol::Https { ref address, ref port, ref cert, ref key } => {

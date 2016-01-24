@@ -5,22 +5,18 @@ authors = ["Marcin <kociolek.farfocle@gmail.com>"]
 
 
 [dependencies]
-hyper = "*"
-rustc-serialize = "*"
-log = "*"
-yaml-rust = "*"
-regex = "*"
+getopts = "^0.2"
+hyper = "^0.7"
+rustc-serialize = "^0.3"
+log = "^0.3"
+yaml-rust = "^0.3"
 clippy = {version = "*", optional = true}
-rust-crypto = "*"
-hyperlocal = "0.1.0"
+rust-crypto = "^0.2"
+hyperlocal = "^0.1"
 
 [dependencies.jsonrpc]
 git = "https://kociolek@bitbucket.org/kociolek/jsonrpc.git"
 branch = "custom-properties"
-
-[dependencies.clap]
-version = "*"
-features = [ "yaml" ]
 
 [features]
 default = []

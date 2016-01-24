@@ -2,9 +2,7 @@ extern crate hyper;
 extern crate jsonrpc;
 extern crate rustc_serialize;
 extern crate log;
-extern crate clap;
 extern crate yaml_rust;
-extern crate regex;
 extern crate crypto;
 
 use std::collections::VecDeque;
