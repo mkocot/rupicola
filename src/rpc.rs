@@ -1,4 +1,3 @@
-
 use config::*;
 use jsonrpc::{JsonRpcServer, JsonRpcRequest, ErrorCode, ErrorJsonRpc, Handler};
 use rustc_serialize::json::{ToJson, Json};

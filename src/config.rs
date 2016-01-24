@@ -1,25 +1,16 @@
-extern crate hyper;
-extern crate jsonrpc;
-extern crate rustc_serialize;
 extern crate log;
-extern crate yaml_rust;
-extern crate crypto;
 
-use std::collections::VecDeque;
+use params::MethodParam;
+use rustc_serialize::json::{ToJson, Json};
+use rustc_serialize::hex::ToHex;
 use std::sync::Arc;
 use std::io::Read;
-use rustc_serialize::json::{ToJson, Json};
-use yaml_rust::{YamlLoader, Yaml};
-use std::collections::{HashMap, BTreeMap};
+use std::collections::{HashMap, VecDeque, BTreeMap};
 use std::fs::File;
-use log::{LogRecord, LogLevelFilter, LogMetadata};
-use params::MethodParam;
 use std::os::unix::raw::{gid_t, uid_t};
-
-// Why FFS self::crypto?!
-use self::crypto::digest::Digest;
-use self::crypto::md5::Md5;
-use self::crypto::sha1::Sha1;
+use openssl::crypto::hash::{hash as hash_fn, Type};
+use log::{LogRecord, LogLevelFilter, LogMetadata};
+use yaml_rust::{YamlLoader, Yaml};
 
 pub enum PassType {
     Plain(String),
@@ -29,19 +20,16 @@ pub enum PassType {
 
 impl PassType {
     pub fn validate(&self, pass: &str) -> bool {
+
         match *self {
             PassType::Plain(ref p) => p == pass,
 
             PassType::Md5(ref hash) => {
-                let mut md5 = Md5::new();
-                md5.input_str(pass);
-                &md5.result_str() == hash
+                hash_fn(Type::MD5, pass.as_bytes()).to_hex() == *hash
             },
 
             PassType::Sha1(ref hash) => {
-                let mut sha1 = Sha1::new();
-                sha1.input_str(pass);
-                &sha1.result_str() == hash
+                hash_fn(Type::SHA1, pass.as_bytes()).to_hex() == *hash
             }
         }
     }

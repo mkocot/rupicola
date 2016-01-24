@@ -8,6 +8,7 @@ mod lazy_response;
 mod rpc;
 
 // External dependencies
+extern crate openssl;
 extern crate getopts;
 extern crate hyper;
 extern crate hyperlocal;

@@ -1,5 +1,3 @@
-extern crate rustc_serialize;
-
 use rustc_serialize::json::{ToJson, Json};
 use config::ParameterDefinition;
 use std::sync::Arc;
