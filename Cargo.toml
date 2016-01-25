@@ -15,8 +15,12 @@ openssl = "^0.7"
 hyperlocal = "^0.1"
 
 [dependencies.jsonrpc]
-git = "https://kociolek@bitbucket.org/kociolek/jsonrpc.git"
+git = "https://bitbucket.org/kociolek/jsonrpc.git"
 branch = "custom-properties"
+
+[dependencies.syslog]
+git = "https://bitbucket.org/kociolek/rust-syslog.git"
+branch = "master"
 
 [features]
 default = []

@@ -1,4 +1,5 @@
 extern crate log;
+extern crate syslog;
 
 use params::MethodParam;
 use rustc_serialize::json::{ToJson, Json};
@@ -11,6 +12,7 @@ use std::os::unix::raw::{gid_t, uid_t};
 use openssl::crypto::hash::{hash as hash_fn, Type};
 use log::{LogRecord, LogLevelFilter, LogMetadata};
 use yaml_rust::{YamlLoader, Yaml};
+use syslog::Facility;
 
 pub enum PassType {
     Plain(String),
@@ -190,14 +192,22 @@ impl log::Log for SimpleLogger {
     }
 }
 
-fn set_log_level(level: log::LogLevelFilter) {
+fn set_log_level(level: log::LogLevelFilter, backend: &str, path: Option<&str>) {
     if let Err(e) = log::set_logger(|max_log_level| {
         max_log_level.set(level);
-        Box::new(SimpleLogger)
+        if backend == "syslog" {
+            let facility = Facility::LOG_USER;
+            if let Some(socket_path) = path {
+                syslog::unix_custom(facility, socket_path).unwrap()
+            } else {
+                syslog::unix(facility).unwrap()
+            }
+        } else {
+            Box::new(SimpleLogger)
+        }
     }) {
         println!("Log framework failed {}", e);
     }
-
 }
 
 impl ServerConfig {
@@ -337,14 +347,20 @@ impl ServerConfig {
 
     pub fn read_from_file(config_file: &str) -> ServerConfig {
         // parse config file
-        let mut f = File::open(config_file).unwrap();
+        let mut f = match File::open(config_file) {
+            Ok(file) => file,
+            Err(e) => {
+                panic!("Unable to read config file {}. Error: {}", config_file, e);
+            }
+        };
         let mut s = String::new();
         f.read_to_string(&mut s).unwrap();
         let config = YamlLoader::load_from_str(&s).unwrap();
         let config_yaml = &config[0];
 
         let mut server_config = ServerConfig::new();
-
+        let backend = config_yaml["log"]["backend"].as_str().map(|s|s.to_lowercase()).unwrap_or("stdout".to_owned());
+        let path = config_yaml["log"]["path"].as_str();
         if let Some(log_level) = config_yaml["log"]["level"].as_str() {
             server_config.log_level = match &log_level.to_lowercase() as &str {
                 "trace" => LogLevelFilter::Trace,
@@ -354,16 +370,14 @@ impl ServerConfig {
                 "error" => LogLevelFilter::Error,
                 "off" => LogLevelFilter::Off,
                 unknown => {
-                    // Just fallback to already set default
-                    set_log_level(server_config.log_level);
-                    warn!("Unknown log level: {}", unknown);
-                    server_config.log_level
+                    println!("Unknown log level: {}", unknown);
+                    LogLevelFilter::Info
                 }
             };
         }
 
         // set default sane log level (we should set it to max? or max only in debug)
-        set_log_level(server_config.log_level);
+        set_log_level(server_config.log_level, &backend, path);
         info!("Using configuration from: {}", config_file);
 
         server_config.protocol_definition = Self::parse_protocol_definition(config_yaml).unwrap();

@@ -17,6 +17,7 @@ extern crate jsonrpc;
 extern crate log;
 extern crate rustc_serialize;
 extern crate yaml_rust;
+extern crate syslog;
 
 use config::*;
 use hyper::status::StatusCode;
@@ -294,19 +295,23 @@ fn main() {
     opts.optopt("c", "config", "Set config file", "CONFIG");
     opts.optflag("h", "help", "Print this help menu");
     opts.optflag("v", "version", "Print program version");
+
     let matches = match opts.parse(&args[1..]) {
         Ok(m) => m,
         Err(e) => panic!(e.to_string())
     };
+
     if matches.opt_present("h") {
         let brief = format!("Simple RPC daemon with streaming.\nUsage: {} [options]", program);
         print!("{}", opts.usage(&brief));
         return;
     }
+
     if matches.opt_present("v") {
         print!("0.1.0");
         return;
     }
+
     let config_file = matches.opt_str("c").unwrap_or("/etc/jsonrpcd/jsonrpcd.conf".to_owned());
     let config = ServerConfig::read_from_file(&config_file);
     // set_log_level(config.log_level);
