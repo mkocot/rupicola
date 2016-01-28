@@ -22,7 +22,6 @@ pub enum PassType {
 
 impl PassType {
     pub fn validate(&self, pass: &str) -> bool {
-
         match *self {
             PassType::Plain(ref p) => p == pass,
 
@@ -100,38 +99,60 @@ pub struct ServerConfig {
     pub default_limits: Arc<Limits>,
 }
 
+/// Response encoding returned to client
 #[derive(Clone, PartialEq)]
 pub enum ResponseEncoding {
+    /// Return response as utf-8
     Utf8,
+    /// Convert response with base64 encoding. Use this for binary data.
     Base64,
 }
 
+/// Privilage of called subprocedure
 #[derive(Clone)]
 pub enum RunAs {
+    /// Invoke subprocedure with GID and UID of server process
     Default,
+    /// Change GID and UID before starting subprocedure
     Custom { gid: gid_t, uid: uid_t}
 }
 
+/// Expected output from called subprocedure
 #[derive(Clone, PartialEq)]
 pub enum OutputEncoding {
+    /// Output is converted to utf-8 string
     Text,
+    /// Output is converted to JSON
     Json
 }
 
+/// Method description
 #[derive(Clone)]
 pub struct MethodDefinition {
+    /// Method name
     pub name: String,
+    /// Path to executable or library
     pub path: String,
+    /// Parameters passed to call
     pub exec_params: Vec<MethodParam>,
+    /// Variables
     pub variables: HashMap<String, Arc<ParameterDefinition>>,
+    /// Fake response used for methods with delayed execution
     pub use_fake_response: Option<Json>,
     /// Delayed execution in seconds
     pub delay: u32,
+    /// Response encoding
     pub response_encoding: ResponseEncoding,
+    /// Private method - accessible only from loopback and without auth
     pub is_private: bool,
+    /// Override limits for execution time and response size
     pub limits: Arc<Limits>,
+    /// Desire privilage configuration
     pub run_as: RunAs,
+    /// Subprocedure output encoding
     pub output: OutputEncoding,
+    /// Method support streaming extension
+    pub streamed: bool,
 }
 
 
@@ -144,10 +165,28 @@ impl MethodParam {
     }
 }
 
+/// Type of parameter
 #[derive(Debug, Clone, PartialEq)]
 pub enum ParameterType {
+    /// Any input that can be converted to string
     String,
+    /// Input that is valid number (float or integer)
     Number,
+    /// Input with true and false value
+    Bool
+}
+
+/// Description of parameter
+#[derive(Debug, Clone)]
+pub struct ParameterDefinition {
+    /// Name of parameter
+    pub name: String,
+    /// Is this parameter optional?
+    pub optional: bool,
+    /// Type of parameter
+    pub param_type: ParameterType,
+    /// Default value (if any)
+    pub default: Option<String>,
 }
 
 impl ParameterType {
@@ -157,6 +196,7 @@ impl ParameterType {
             Json::I64(ref i) if *self == ParameterType::Number => Ok(Some(i.to_string())),
             Json::U64(ref i) if *self == ParameterType::Number => Ok(Some(i.to_string())),
             Json::F64(ref i) if *self == ParameterType::Number => Ok(Some(i.to_string())),
+            Json::Boolean(ref b) if *self == ParameterType::Bool => Ok(Some(b.to_string())),
             _ => Err(())
         }
     }
@@ -165,18 +205,13 @@ impl ParameterType {
         match *val {
             Yaml::Real(ref r) if *self == ParameterType::Number => Ok(Some(r.to_owned())),
             Yaml::Integer(ref i) if *self == ParameterType::Number => Ok(Some(i.to_string())),
+            Yaml::Boolean(ref b) if *self == ParameterType::Bool => Ok(Some(b.to_string())),
+            Yaml::String(ref s) if *self == ParameterType::String => Ok(Some(s.to_owned())),
             _ => Err(())
         }
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct ParameterDefinition {
-    pub name: String,
-    pub optional: bool,
-    pub param_type: ParameterType,
-    pub default: Option<String>,
-}
 
 struct SimpleLogger;
 
@@ -211,26 +246,6 @@ fn set_log_level(level: log::LogLevelFilter, backend: &str, path: Option<&str>) 
 }
 
 impl ServerConfig {
-    // TODO: remove this
-    pub fn new() -> ServerConfig {
-        ServerConfig {
-            protocol_definition: ProtocolDefinition {
-                protocol: Protocol::Http {
-                    address: "127.0.0.1".to_owned(),
-                    port: 1337,
-                },
-                auth: AuthMethod::None,
-                rpc_path: "/jsonrpc".to_owned(),
-                stream_path: "/streaming".to_owned(),
-            },
-            methods: HashMap::new(),
-            streams: HashMap::new(),
-            log_level: log::LogLevelFilter::Info,
-            default_limits: Arc::new(Limits::new()),
-        }
-    }
-
-
     pub fn parse_protocol_definition(config: &Yaml) -> Result<ProtocolDefinition, ()> {
         let protocol_definition = &config["protocol"];
         let auth;
@@ -358,38 +373,43 @@ impl ServerConfig {
         let config = YamlLoader::load_from_str(&s).unwrap();
         let config_yaml = &config[0];
 
-        let mut server_config = ServerConfig::new();
+        //let mut server_config = ServerConfig::new();
         let backend = config_yaml["log"]["backend"].as_str().map(|s|s.to_lowercase()).unwrap_or("stdout".to_owned());
         let path = config_yaml["log"]["path"].as_str();
-        if let Some(log_level) = config_yaml["log"]["level"].as_str() {
-            server_config.log_level = match &log_level.to_lowercase() as &str {
-                "trace" => LogLevelFilter::Trace,
-                "debug" => LogLevelFilter::Debug,
-                "info" => LogLevelFilter::Info,
-                "warn" => LogLevelFilter::Warn,
-                "error" => LogLevelFilter::Error,
-                "off" => LogLevelFilter::Off,
+        let log_level = config_yaml["log"]["level"].as_str().and_then(|s| {
+            match &s.to_lowercase() as &str {
+                "trace" => Some(LogLevelFilter::Trace),
+                "debug" => Some(LogLevelFilter::Debug),
+                "info" => Some(LogLevelFilter::Info),
+                "warn" => Some(LogLevelFilter::Warn),
+                "error" => Some(LogLevelFilter::Error),
+                "off" => Some(LogLevelFilter::Off),
                 unknown => {
                     println!("Unknown log level: {}", unknown);
-                    LogLevelFilter::Info
+                    None
                 }
-            };
-        }
+            }}).unwrap_or(LogLevelFilter::Info);
 
         // set default sane log level (we should set it to max? or max only in debug)
-        set_log_level(server_config.log_level, &backend, path);
+        set_log_level(log_level, &backend, path);
         info!("Using configuration from: {}", config_file);
 
-        server_config.protocol_definition = Self::parse_protocol_definition(config_yaml).unwrap();
+        let protocol_definition = Self::parse_protocol_definition(config_yaml).unwrap();
+        let mut methods = HashMap::<String, MethodDefinition>::new();
+        let mut streams = HashMap::<String, MethodDefinition>::new();
+        let default_limits = Arc::new(Limits::new());
 
-        if let Some(methods) = config_yaml["methods"].as_hash() {
-            parse_methods(methods,
-                          &mut server_config.methods,
-                          &mut server_config.streams,
-                          &server_config.default_limits);
+        if let Some(methods_node) = config_yaml["methods"].as_hash() {
+            parse_methods(methods_node, &mut methods, &mut streams, &default_limits);
         }
 
-        server_config
+        ServerConfig {
+            protocol_definition: protocol_definition,
+            log_level: log_level,
+            methods: methods,
+            streams: streams,
+            default_limits: default_limits
+        }
     }
 }
 
@@ -533,23 +553,17 @@ fn parse_param(exec_param: &Yaml,
     }
 }
 
-fn parse_methods(methods: &BTreeMap<Yaml, Yaml>,
-                 rpc_config_methods: &mut HashMap<String, MethodDefinition>,
-                 str_config_methods: &mut HashMap<String, MethodDefinition>,
-                 default_limits: &Arc<Limits>) {
-    for (method_name, method_def) in methods {
+fn parse_method(method_name: &Yaml, method_def: &Yaml, default_limits: &Arc<Limits>) -> Result<MethodDefinition, String> {
         // Name method MUST be string
         let name = match method_name.as_str() {
             Some(name) => name,
             None => {
-                warn!("Method name {:?} is invalid", method_name);
-                continue;
+                return Err(format!("Method name {:?} is invalid", method_name));
             }
         };
         let invoke = &method_def["invoke"];
         if invoke.as_hash() == None {
-            warn!("Method {}: Missing required parameter 'invoke'", name);
-            continue;
+            return Err(format!("Method {}: Missing required parameter 'invoke'", name));
         }
         let streamed = method_def["streamed"].as_bool().unwrap_or(false);
 
@@ -557,10 +571,8 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>,
         let path = if let Some(path) = invoke["exec"].as_str() {
             path
         } else {
-            error!("Required parameter missin: path. Skip definition for {}", name);
-            continue;
+            return Err(format!("Required parameter missin: path. Skip definition for {}", name));
         };
-
         let delay = invoke["delay"]
                         .as_i64()
                         .and_then(|delay| {
@@ -581,20 +593,17 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>,
                 let name = if let Some(s) = name_it.as_str().map(|s| s.to_owned()) {
                     s
                 } else {
-                    error!("Invalid name. Ignored");
-                    continue;
+                    return Err("Invalid name. Ignored".to_owned());
                 };
                 if name == "self" {
-                    error!("Used restricted keyword 'self'. Ignoring.");
-                    continue;
+                    return Err("Used restricted keyword 'self'. Ignoring.".to_owned());
                 }
                 let optional = definition_it["optional"].as_bool().unwrap_or(false);
                 let param_type = match definition_it["type"].as_str().unwrap_or("") {
                     "string" => ParameterType::String,
                     "number" => ParameterType::Number,
                     _ => {
-                        error!("No parameter type or invalid value for {:?}", name);
-                        continue;
+                        return Err(format!("No parameter type or invalid value for {:?}", name));
                     }
                 };
                 let default_from_settings = &definition_it["default"];
@@ -602,7 +611,7 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>,
                     conv
                 } else {
                     if !default_from_settings.is_badvalue() {
-                        error!("Provided default value {:?} cannot be converted to {:?}",
+                        error!("Provided default value {:?} cannot be converted to {:?}. Leaving empty",
                                default_from_settings, param_type);
                     }
                     None
@@ -616,12 +625,9 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>,
                 };
                 parameters.insert(name, Arc::new(definition));
             }
-        } else {
-            if !params.is_badvalue() {
+        } else if !params.is_badvalue() {
                 error!("[{}] Invalid value for field: 'param'", name);
-            }
         }
-
         let mut variables = Vec::<MethodParam>::new();
 
         if let Some(exec_params) = invoke["args"].as_vec() {
@@ -634,14 +640,9 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>,
             }
         }
         // For now only string...
-        let fake_response = if let Some(json) = method_def["response"].as_str() {
-            Some(json.to_json())
-        } else {
-            None
-        };
+        let fake_response = method_def["response"].as_str().map(|json|json.to_json());
 
         let is_private = method_def["private"].as_bool().unwrap_or(false);
-
         //This is a bug? Sometimes rustc cant handle &String to &str conversion
         let response_encoding = match &method_def["encoding"].as_str()
             .map(|s| s.to_lowercase()).unwrap_or("".to_owned()) as &str {
@@ -675,15 +676,13 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>,
             let gid = if let Some(gid) = run_as_node["gid"].as_i64() {
                 gid as gid_t
             } else {
-                warn!("[{}]: Invalid gid", name);
-                continue;
+                return Err(format!("[{}]: Invalid gid", name));
             };
 
             let uid = if let Some(uid) = run_as_node["uid"].as_i64() {
                 uid as gid_t
             } else {
-                warn!("[{}]: Invalid uid", name);
-                continue;
+                return Err(format!("[{}]: Invalid uid", name));
             };
             info!("[{}]: Using permission: GID: {} UID: {}", name, gid, uid);
             // Check if user exists?
@@ -708,7 +707,7 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>,
             }
         }).unwrap_or(OutputEncoding::Text);
         
-        let method_definition = MethodDefinition {
+        Ok(MethodDefinition {
             name: name.to_owned(),
             path: path.to_owned(),
             // this contains app invocation arguments, each argument in its own
@@ -722,14 +721,26 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>,
             limits: method_limits,
             run_as: run_as,
             output: output_encoding,
-        };
+            streamed: streamed,
+        })
+}
 
-        info!("Registered method: {}. Support streaming: {}", name, streamed);
-
-        if streamed {
-            str_config_methods.insert(method_definition.name.clone(), method_definition);
-        } else {
-            rpc_config_methods.insert(method_definition.name.clone(), method_definition);
+fn parse_methods(methods: &BTreeMap<Yaml, Yaml>,
+                 rpc_config_methods: &mut HashMap<String, MethodDefinition>,
+                 str_config_methods: &mut HashMap<String, MethodDefinition>,
+                 default_limits: &Arc<Limits>) {
+    for (method_name, method_def) in methods {
+        let method_definition = parse_method(method_name, method_def, default_limits);
+        match method_definition {
+            Ok(method_definition) => {
+                info!("Registered method: {}. Support streaming: {}", method_definition.name, method_definition.streamed);
+                if method_definition.streamed {
+                    str_config_methods.insert(method_definition.name.clone(), method_definition);
+                } else {
+                    rpc_config_methods.insert(method_definition.name.clone(), method_definition);
+                }
+            },
+            Err(e) => warn!("Unable to parse method: {}", e)
         }
     }
 }

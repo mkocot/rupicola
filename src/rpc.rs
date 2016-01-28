@@ -98,7 +98,7 @@ impl Handler for RpcHandler {
                     &mut base_command
                 }}
                 .args(&arguments);
-
+            // todo: limit output .. spawn child and wait reading?
             let output = command.output()
                     .map(|o| {
                         // Convert from Cow do String or from String to Cow?

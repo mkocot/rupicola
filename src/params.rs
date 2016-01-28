@@ -23,18 +23,6 @@ impl Unroll for ParameterDefinition {
         // get info from params
         // for now variables support only objects
         match params.find(&self.name as &str) {
-            //Some(&Json::String(ref s)) if self.param_type == ParameterType::String => {
-            //    Ok(Some(s.to_owned()))
-            //}
-            //Some(&Json::I64(ref i)) if self.param_type == ParameterType::Number => {
-            //    Ok(Some(i.to_string()))
-            //}
-            //Some(&Json::U64(ref i)) if self.param_type == ParameterType::Number => {
-            //    Ok(Some(i.to_string()))
-            //}
-            //Some(&Json::F64(ref s)) if self.param_type == ParameterType::Number => {
-            //    Ok(Some(s.to_string()))
-            //}
             Some(ref s) => {
                 let conversion_result = self.param_type.convert(s);
                 if conversion_result.is_err() {
@@ -58,24 +46,20 @@ impl Unroll for ParameterDefinition {
 impl Unroll for Vec<MethodParam> {
     fn unroll(&self, params: &Json) -> Result<Option<String>, ()> {
         let mut result = String::new();
-        let mut all_ok = true;
 
         for element in self.iter() {
             match element.unroll(params) {
                 Ok(Some(ref o)) => result.push_str(o),
-                Ok(None) | Err(_) => {
-                    debug!("Optional variable {:?} is missing. Skip whole chain", element);
-                    all_ok = false;
-                    break;
+                skip @Ok(None) | skip @Err(_) => {
+                    if skip.is_ok() {
+                        info!("Optional variable {:?} is missing. Skip whole chain", element);
+                    }
+                    // Return either Ok(None) or Err(..)
+                    return skip;
                 }
             }
         }
-
-        if all_ok {
-            Ok(Some(result))
-        } else {
-            Ok(None)
-        }
+        Ok(Some(result))
     }
 }
 
