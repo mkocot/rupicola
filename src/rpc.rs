@@ -4,12 +4,13 @@ use rustc_serialize::json::{ToJson, Json};
 use rustc_serialize::base64::{STANDARD, ToBase64};
 use std::thread;
 use std::time::Duration;
-use std::process::Command;
+use std::process::{Command, Stdio};
 use std::collections::HashMap;
 use params::{Unroll, MethodParam};
 use handlers::{ResponseHandler, HandlerError};
-use std::io::{Read, Write};
+use std::io::{Read, Write, copy, sink};
 use std::os::unix::process::CommandExt;
+use std::cmp;
 
 pub struct RpcHandler {
     methods: HashMap<String, MethodDefinition>,
@@ -19,6 +20,91 @@ impl RpcHandler {
     pub fn new(methods: HashMap<String, MethodDefinition>) -> RpcHandler {
         RpcHandler { methods: methods }
     }
+}
+
+fn invoke_method(method: &MethodDefinition, arguments: &[String]) -> Result<Json, ErrorJsonRpc> {
+    let mut base_command = Command::new(&method.path);
+    let command = {
+        if let RunAs::Custom { gid, uid } = method.run_as {
+            base_command.gid(gid).uid(uid)
+        } else {
+            &mut base_command
+        }}
+        .args(&arguments)
+        .stdin(Stdio::null()) // Ignore stdin
+        .stderr(Stdio::null()) // Ignore stderr
+        .stdout(Stdio::piped()); // Capture stdout
+
+    let spawn = command.spawn().and_then(|child| {
+        // At most limit size
+        let mut response_buffer = Vec::new();
+        let mut stdout = if let Some(stdout) = child.stdout {
+            stdout
+        } else {
+            panic!("No stdout - this is likely a bug in server!");
+        };
+        let mut buffer_overrun = false;
+        let mut buffer = [0; 2048];
+        loop {
+            let read = try!(stdout.read(&mut buffer[..]));
+            if read == 0 {
+                debug!("Finished reading response from child stdout");
+                break;
+            }
+
+            let allowed_write_size = if method.limits.max_response == 0 {
+                read
+            } else {
+                let remaining_response_size = cmp::max(
+                        method.limits.max_response as usize - response_buffer.len(), 0);
+                let max_write_chunk = cmp::min(remaining_response_size, read);
+                if max_write_chunk == 0 {
+                    error!("Exceed maximum response size! Skipping remaining data!");
+                    try!(copy(&mut stdout, &mut sink()));
+                    buffer_overrun = true;
+                    break;
+                }
+                if max_write_chunk != read {
+                    warn!("Reached maximum allowed responsze size ({})",
+                        method.limits.max_response);
+                }
+                max_write_chunk as usize
+            };
+            if allowed_write_size > 0 {
+                response_buffer.extend_from_slice(&buffer[0..allowed_write_size]);
+            }
+        }
+
+        if buffer_overrun {
+            Ok(Err(response_buffer))
+        } else {
+            Ok(Ok(response_buffer))
+        }
+    }).map_err(|e| {
+        error!("Failed to start command: {}", e);
+        ErrorJsonRpc::new(ErrorCode::ServerError(-32001, "Subprocedure failed to run"))
+    }).and_then(|o| {
+        // We could get there in 2 path: normal execution and clamped output execution
+        let converted_output =  match o {
+            Err(ref o) | Ok(ref o) => {
+                if method.response_encoding == ResponseEncoding::Utf8 {
+                    String::from_utf8_lossy(&o).into_owned()
+                } else {
+                    o.to_base64(STANDARD)
+                }
+            },
+        };
+        match o {
+            Err(_) => Err(ErrorJsonRpc::new_data(
+                    ErrorCode::ServerError(-32003,
+                            "Subprocedure exceded maximum response size"),
+                            converted_output.to_json())),
+            Ok(_) => Ok(converted_output)
+        }
+    }).and_then(|o| {
+        Ok(o.to_json())
+    });
+    return spawn;
 }
 
 impl Handler for RpcHandler {
@@ -55,78 +141,21 @@ impl Handler for RpcHandler {
 
         info!("[{}] Method invoke with {:?}", req.method, arguments);
         if let Some(ref fake_response) = method.use_fake_response {
-            // delayed response...
+            // delayed response... this is rare corner case
+            // cloning method definition if perfectly acceptable
             info!("[{}] Delayed command execution. Faking response {}",
                   req.method, fake_response);
-            let delay = method.delay as u64;
-            let run_as = method.run_as.clone();
-            let path = method.path.clone();
+            let method_clone = method.clone();
             thread::spawn(move || {
-                thread::sleep(Duration::new(delay, 0));
-                info!("Executing delayed ({}ms) command", delay);
-
-                let mut base_command = Command::new(&path);
-                let command = {
-                    if let RunAs::Custom { gid, uid } = run_as {
-                        base_command.gid(gid).uid(uid)
-                    } else {
-                        &mut base_command
-                    }}
-                    .args(&arguments);
-
-                match command.output() {
-                    Ok(o) => {
-                        // Log as lossy utf8.
-                        // TODO: Limit output size? Eg cat on whole partition?
-                        info!("Execution finished\nStatus: {}\nStdout: {}\nStderr: {}\n",
-                              o.status,
-                              String::from_utf8_lossy(&o.stdout),
-                              String::from_utf8_lossy(&o.stderr));
-                    }
-                    Err(e) => info!("Failed to execute process: {}", e),
-                }
+                thread::sleep(Duration::new(method_clone.delay as u64, 0));
+                info!("Executing delayed ({}ms) command", method_clone.delay);
+                let procedure_result = invoke_method(&method_clone, &arguments);
+                info!("Delayed execution finished: {:?}", procedure_result);
             });
             //This method support only utf-8 (we just spit whole json from config...)
             return Ok(fake_response.clone());
         } else {
-            //Encode to baseXY?
-            let mut base_command = Command::new(&method.path);
-            let command = {
-                if let RunAs::Custom { gid, uid } = method.run_as {
-                    base_command.gid(gid).uid(uid)
-                } else {
-                    &mut base_command
-                }}
-                .args(&arguments);
-            // todo: limit output .. spawn child and wait reading?
-            let output = command.output()
-                    .map(|o| {
-                        // Convert from Cow do String or from String to Cow?
-                        if method.response_encoding == ResponseEncoding::Utf8 {
-                            String::from_utf8_lossy(&o.stdout).into_owned()
-                        } else {
-                            o.stdout.to_base64(STANDARD)
-                        }
-                    })
-                    .map_err(|e|{
-                        error!("Failed to start command: {}", e);
-                        ErrorJsonRpc::new(ErrorCode::ServerError(-32001, "Subprocedure failed to run"))
-                    })
-                    .and_then(|o| {
-                        //map to error or success now
-                        if method.output == OutputEncoding::Json {
-                            match Json::from_str(&o) {
-                                Ok(json) => Ok(json),
-                                Err(e) => {
-                                    error!("Conversion to JSON failed! Error: {:?}", e);
-                                    Err(ErrorJsonRpc::new(ErrorCode::ServerError(-32003, "Output conversion failed")))
-                                }
-                            }
-                        } else {
-                            Ok(o.to_json())
-                        }
-                    });
-            return output;
+            return invoke_method(&method, &arguments);
         }
     }
 }
@@ -150,7 +179,6 @@ impl ResponseHandler for JsonRpcServer<RpcHandler> {
                        req: &mut Read,
                        res: &mut Write,
                        is_auth: bool) -> Result<(), HandlerError> {
-        // TODO: check required content type
         let mut request = String::new();
         if req.read_to_string(&mut request).is_err() {
             warn!("Unable to read request");

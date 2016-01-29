@@ -271,12 +271,12 @@ impl SenderHandler {
 
         // Read as bytes chunks
         let mut read_buffer = [0; 2048];
-        while let Ok(readed) = reader.read(&mut read_buffer[..]) {
-            if readed == 0 {
+        while let Ok(read) = reader.read(&mut read_buffer[..]) {
+            if read == 0 {
                 info!("End of stream");
                 break;
             }
-            try!(streaming_response.write(&read_buffer[0..readed]));
+            try!(streaming_response.write(&read_buffer[0..read]));
             try!(streaming_response.flush());
         }
 

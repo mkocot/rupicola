@@ -63,7 +63,7 @@ pub enum Protocol {
     },
 }
 
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct Limits {
     pub read_timeout: u32,
     pub exec_timeout: u32,
@@ -397,8 +397,9 @@ impl ServerConfig {
         let protocol_definition = Self::parse_protocol_definition(config_yaml).unwrap();
         let mut methods = HashMap::<String, MethodDefinition>::new();
         let mut streams = HashMap::<String, MethodDefinition>::new();
-        let default_limits = Arc::new(Limits::new());
-
+        info!("{:?}", config_yaml["limits"]);
+        let default_limits = Arc::new(parse_limits(&config_yaml["limits"], &Limits::new()));
+        info!("{:?}", default_limits);
         if let Some(methods_node) = config_yaml["methods"].as_hash() {
             parse_methods(methods_node, &mut methods, &mut streams, &default_limits);
         }
@@ -418,7 +419,7 @@ fn parse_limits(node: &Yaml, proto: &Limits) -> Limits {
         read_timeout: node["read-timeout"].as_i64().map(|i|i as u32).unwrap_or(proto.read_timeout),
         exec_timeout: node["exec-timeout"].as_i64().map(|i|i as u32).unwrap_or(proto.exec_timeout),
         payload_size: node["payload-size"].as_i64().map(|i|i as u32).unwrap_or(proto.payload_size),
-        max_response: node["max_response"].as_i64().map(|i|i as u32).unwrap_or(proto.max_response),
+        max_response: node["max-response"].as_i64().map(|i|i as u32).unwrap_or(proto.max_response),
     }
 }
 
@@ -443,11 +444,12 @@ fn parse_param(exec_param: &Yaml,
         }
         // Do we have simple parameter reference here?
         if exec_param.as_hash().is_some() {
+            let skip_output = exec_param["skip"].as_bool().unwrap_or(false);
             match exec_param["param"]
                       .as_str()
                       .ok_or("Expected {{param: name}} object!")
                       .and_then(|s| parameters.get(s).ok_or("No binding for variable."))
-                      .map(|s| MethodParam::Variable(s.clone())) {
+                      .map(|s| MethodParam::Variable(s.clone(), skip_output)) {
                 Ok(s) => return Ok(s),
                 Err(e) => {
                     // we need to check if this is case of self

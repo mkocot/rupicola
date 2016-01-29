@@ -7,7 +7,7 @@ pub enum MethodParam {
     /// This is just constant string
     Constant(String),
     /// This is ref to parameter definition
-    Variable(Arc<ParameterDefinition>),
+    Variable(Arc<ParameterDefinition>, bool),
     /// Chained MethodParams
     Chained(Vec<MethodParam>),
     /// Capture all params as one-line json string
@@ -74,8 +74,15 @@ impl Unroll for MethodParam {
                 } else {
                     Ok(Some(json))
                 }
-            }
-            MethodParam::Variable(ref v) => v.unroll(params),
+            },
+            MethodParam::Variable(ref v, skip) => {
+                match v.unroll(params) {
+                    // We cannot return Ok(None) (because that wolud skip WHOLE chain)
+                    // Empty string dosn't change response and keep all chain
+                    Ok(Some(_)) if skip => Ok(Some("".to_owned())),
+                    all => all,
+                }
+            },
             MethodParam::Chained(ref c) => c.unroll(params),
         }
     }
