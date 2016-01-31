@@ -374,7 +374,7 @@ impl ServerConfig {
         let config_yaml = &config[0];
 
         //let mut server_config = ServerConfig::new();
-        let backend = config_yaml["log"]["backend"].as_str().map(|s|s.to_lowercase()).unwrap_or("stdout".to_owned());
+        let backend = config_yaml["log"]["backend"].as_str().map_or("stdout".to_owned(), |s|s.to_lowercase());
         let path = config_yaml["log"]["path"].as_str();
         let log_level = config_yaml["log"]["level"].as_str().and_then(|s| {
             match &s.to_lowercase() as &str {
@@ -416,11 +416,48 @@ impl ServerConfig {
 
 fn parse_limits(node: &Yaml, proto: &Limits) -> Limits {
     Limits {
-        read_timeout: node["read-timeout"].as_i64().map(|i|i as u32).unwrap_or(proto.read_timeout),
-        exec_timeout: node["exec-timeout"].as_i64().map(|i|i as u32).unwrap_or(proto.exec_timeout),
-        payload_size: node["payload-size"].as_i64().map(|i|i as u32).unwrap_or(proto.payload_size),
-        max_response: node["max-response"].as_i64().map(|i|i as u32).unwrap_or(proto.max_response),
+        read_timeout: node["read-timeout"].as_i64().map_or(proto.read_timeout, |i|i as u32),
+        exec_timeout: node["exec-timeout"].as_i64().map_or(proto.exec_timeout, |i|i as u32),
+        payload_size: node["payload-size"].as_i64().map_or(proto.payload_size, |i|i as u32),
+        max_response: node["max-response"].as_i64().map_or(proto.max_response, |i|i as u32),
     }
+}
+
+fn extract_simple(exec_param: &Yaml,
+                  parameters: &HashMap<String, Arc<ParameterDefinition>>)
+                  -> Result<MethodParam, ()> {
+    // Bind all simple types
+    if let Some(c) = match *exec_param {
+        Yaml::Real(ref s) | Yaml::String(ref s) => Some(s.to_owned()),
+        Yaml::Integer(ref i) => Some(i.to_string()),
+        Yaml::Boolean(ref b) => Some(b.to_string()),
+        // Complex types
+        _ => None,
+    } {
+        return Ok(MethodParam::Constant(c));
+    }
+    // Do we have simple parameter reference here?
+    if exec_param.as_hash().is_some() {
+        let skip_output = exec_param["skip"].as_bool().unwrap_or(false);
+        match exec_param["param"]
+                  .as_str()
+                  .ok_or("Expected {{param: name}} object!")
+                  .and_then(|s| parameters.get(s).ok_or("No binding for variable."))
+                  .map(|s| MethodParam::Variable(s.clone(), skip_output)) {
+            Ok(s) => return Ok(s),
+            Err(e) => {
+                // we need to check if this is case of self
+                match exec_param["param"].as_str() {
+                    Some("self") => return Ok(MethodParam::Everything),
+                    _ => {
+                        error!("Error: processing {:?} - {}", exec_param["param"], e);
+                        return Err(());
+                    }
+                }
+            }
+        }
+    }
+    Err(())
 }
 
 fn parse_param(exec_param: &Yaml,
@@ -429,42 +466,6 @@ fn parse_param(exec_param: &Yaml,
     // this should make FLAT structure in future
     debug!("Exec param: {:?}", exec_param);
 
-    fn extract_simple(exec_param: &Yaml,
-                      parameters: &HashMap<String, Arc<ParameterDefinition>>)
-                      -> Result<MethodParam, ()> {
-        // Bind all simple types
-        if let Some(c) = match *exec_param {
-            Yaml::Real(ref s) | Yaml::String(ref s) => Some(s.to_owned()),
-            Yaml::Integer(ref i) => Some(i.to_string()),
-            Yaml::Boolean(ref b) => Some(b.to_string()),
-            // Complex types
-            _ => None,
-        } {
-            return Ok(MethodParam::Constant(c));
-        }
-        // Do we have simple parameter reference here?
-        if exec_param.as_hash().is_some() {
-            let skip_output = exec_param["skip"].as_bool().unwrap_or(false);
-            match exec_param["param"]
-                      .as_str()
-                      .ok_or("Expected {{param: name}} object!")
-                      .and_then(|s| parameters.get(s).ok_or("No binding for variable."))
-                      .map(|s| MethodParam::Variable(s.clone(), skip_output)) {
-                Ok(s) => return Ok(s),
-                Err(e) => {
-                    // we need to check if this is case of self
-                    match exec_param["param"].as_str() {
-                        Some("self") => return Ok(MethodParam::Everything),
-                        _ => {
-                            error!("Error: processing {:?} - {}", exec_param["param"], e);
-                            return Err(());
-                        }
-                    }
-                }
-            }
-        }
-        Err(())
-    };
     // Now comes the bad one...
 
     if let Some(v) = exec_param.as_vec() {
@@ -647,7 +648,7 @@ fn parse_method(method_name: &Yaml, method_def: &Yaml, default_limits: &Arc<Limi
         let is_private = method_def["private"].as_bool().unwrap_or(false);
         //This is a bug? Sometimes rustc cant handle &String to &str conversion
         let response_encoding = match &method_def["encoding"].as_str()
-            .map(|s| s.to_lowercase()).unwrap_or("".to_owned()) as &str {
+            .map_or("".to_owned(), |s| s.to_lowercase()) as &str {
                 "utf-8" => ResponseEncoding::Utf8,
                 "base64" => ResponseEncoding::Base64,
                 default => {
@@ -696,7 +697,7 @@ fn parse_method(method_name: &Yaml, method_def: &Yaml, default_limits: &Arc<Limi
 
         let output_encoding_node = method_def["output"]["format"].as_str();
         // Note: If encoding is base64 disable converting to JSON
-        let output_encoding = output_encoding_node.map(|format| {
+        let output_encoding = output_encoding_node.map_or(OutputEncoding::Text, |format| {
             if format == "json" {
                 if response_encoding == ResponseEncoding::Utf8 {
                     OutputEncoding::Json
@@ -707,7 +708,7 @@ fn parse_method(method_name: &Yaml, method_def: &Yaml, default_limits: &Arc<Limi
             } else {
                 OutputEncoding::Text
             }
-        }).unwrap_or(OutputEncoding::Text);
+        });
         
         Ok(MethodDefinition {
             name: name.to_owned(),

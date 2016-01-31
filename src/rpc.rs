@@ -13,98 +13,105 @@ use std::os::unix::process::CommandExt;
 use std::cmp;
 
 pub struct RpcHandler {
+    /// Methods registered with RPC
     methods: HashMap<String, MethodDefinition>,
 }
 
 impl RpcHandler {
+    /// Create new handler for RPC using given methods and names
     pub fn new(methods: HashMap<String, MethodDefinition>) -> RpcHandler {
         RpcHandler { methods: methods }
     }
 }
 
-fn invoke_method(method: &MethodDefinition, arguments: &[String]) -> Result<Json, ErrorJsonRpc> {
-    let mut base_command = Command::new(&method.path);
-    let command = {
-        if let RunAs::Custom { gid, uid } = method.run_as {
-            base_command.gid(gid).uid(uid)
-        } else {
-            &mut base_command
-        }}
-        .args(&arguments)
-        .stdin(Stdio::null()) // Ignore stdin
-        .stderr(Stdio::null()) // Ignore stderr
-        .stdout(Stdio::piped()); // Capture stdout
+trait MethodInvoke {
+    fn invoke(&self, arguments: &[String]) -> Result<Json, ErrorJsonRpc>;
+}
 
-    let spawn = command.spawn().and_then(|child| {
-        // At most limit size
-        let mut response_buffer = Vec::new();
-        let mut stdout = if let Some(stdout) = child.stdout {
-            stdout
-        } else {
-            panic!("No stdout - this is likely a bug in server!");
-        };
-        let mut buffer_overrun = false;
-        let mut buffer = [0; 2048];
-        loop {
-            let read = try!(stdout.read(&mut buffer[..]));
-            if read == 0 {
-                debug!("Finished reading response from child stdout");
-                break;
-            }
-
-            let allowed_write_size = if method.limits.max_response == 0 {
-                read
+impl MethodInvoke for MethodDefinition {
+    fn invoke(&self, arguments: &[String]) -> Result<Json, ErrorJsonRpc> {
+        let mut base_command = Command::new(&self.path);
+        let command = {
+            if let RunAs::Custom { gid, uid } = self.run_as {
+                base_command.gid(gid).uid(uid)
             } else {
-                let remaining_response_size = cmp::max(
-                        method.limits.max_response as usize - response_buffer.len(), 0);
-                let max_write_chunk = cmp::min(remaining_response_size, read);
-                if max_write_chunk == 0 {
-                    error!("Exceed maximum response size! Skipping remaining data!");
-                    try!(copy(&mut stdout, &mut sink()));
-                    buffer_overrun = true;
+                &mut base_command
+            }}
+            .args(&arguments)
+            .stdin(Stdio::null()) // Ignore stdin
+            .stderr(Stdio::null()) // Ignore stderr
+            .stdout(Stdio::piped()); // Capture stdout
+
+        command.spawn().and_then(|child| {
+            // At most limit size
+            let mut response_buffer = Vec::new();
+            let mut stdout = if let Some(stdout) = child.stdout {
+                stdout
+            } else {
+                panic!("No stdout - this is likely a bug in server!");
+            };
+            let mut buffer_overrun = false;
+            let mut buffer = [0; 2048];
+            loop {
+                let read = try!(stdout.read(&mut buffer[..]));
+                if read == 0 {
+                    debug!("Finished reading response from child stdout");
                     break;
                 }
-                if max_write_chunk != read {
-                    warn!("Reached maximum allowed responsze size ({})",
-                        method.limits.max_response);
-                }
-                max_write_chunk as usize
-            };
-            if allowed_write_size > 0 {
-                response_buffer.extend_from_slice(&buffer[0..allowed_write_size]);
-            }
-        }
 
-        if buffer_overrun {
-            Ok(Err(response_buffer))
-        } else {
-            Ok(Ok(response_buffer))
-        }
-    }).map_err(|e| {
-        error!("Failed to start command: {}", e);
-        ErrorJsonRpc::new(ErrorCode::ServerError(-32001, "Subprocedure failed to run"))
-    }).and_then(|o| {
-        // We could get there in 2 path: normal execution and clamped output execution
-        let converted_output =  match o {
-            Err(ref o) | Ok(ref o) => {
-                if method.response_encoding == ResponseEncoding::Utf8 {
-                    String::from_utf8_lossy(&o).into_owned()
+                let allowed_write_size = if self.limits.max_response == 0 {
+                    read
                 } else {
-                    o.to_base64(STANDARD)
+                    let remaining_response_size = cmp::max(
+                            self.limits.max_response as usize - response_buffer.len(), 0);
+                    let max_write_chunk = cmp::min(remaining_response_size, read);
+                    if max_write_chunk == 0 {
+                        error!("Exceed maximum response size! Skipping remaining data!");
+                        try!(copy(&mut stdout, &mut sink()));
+                        buffer_overrun = true;
+                        break;
+                    }
+                    if max_write_chunk != read {
+                        warn!("Reached maximum allowed response size ({})",
+                            self.limits.max_response);
+                    }
+                    max_write_chunk as usize
+                };
+                if allowed_write_size > 0 {
+                    response_buffer.extend_from_slice(&buffer[0..allowed_write_size]);
                 }
-            },
-        };
-        match o {
-            Err(_) => Err(ErrorJsonRpc::new_data(
-                    ErrorCode::ServerError(-32003,
-                            "Subprocedure exceded maximum response size"),
-                            converted_output.to_json())),
-            Ok(_) => Ok(converted_output)
-        }
-    }).and_then(|o| {
-        Ok(o.to_json())
-    });
-    return spawn;
+            }
+
+            if buffer_overrun {
+                Ok(Err(response_buffer))
+            } else {
+                Ok(Ok(response_buffer))
+            }
+        }).map_err(|e| {
+            error!("Failed to start command: {}", e);
+            ErrorJsonRpc::new(ErrorCode::ServerError(-32001, "Subprocedure failed to run"))
+        }).and_then(|o| {
+            // We could get there in 2 path: normal execution and clamped output execution
+            let converted_output =  match o {
+                Err(ref o) | Ok(ref o) => {
+                    if self.response_encoding == ResponseEncoding::Utf8 {
+                        String::from_utf8_lossy(&o).into_owned()
+                    } else {
+                        o.to_base64(STANDARD)
+                    }
+                },
+            };
+            match o {
+                Err(_) => Err(ErrorJsonRpc::new_data(
+                        ErrorCode::ServerError(-32003,
+                                "Subprocedure exceded maximum response size"),
+                                converted_output.to_json())),
+                Ok(_) => Ok(converted_output)
+            }
+        }).and_then(|o| {
+            Ok(o.to_json())
+        })
+    }
 }
 
 impl Handler for RpcHandler {
@@ -122,7 +129,8 @@ impl Handler for RpcHandler {
         if !is_auth && !method.is_private {
             error!("[{}] Invoking public method without authorization!",
                    req.method);
-            return Err(ErrorJsonRpc::new(ErrorCode::ServerError(-32000, "Unauthorized")));
+            return Err(ErrorJsonRpc::new(
+                    ErrorCode::ServerError(-32000, "Unauthorized")));
         }
         // TODO: For now hackish solution
         // Allow not only objects but also arrays
@@ -149,18 +157,18 @@ impl Handler for RpcHandler {
             thread::spawn(move || {
                 thread::sleep(Duration::new(method_clone.delay as u64, 0));
                 info!("Executing delayed ({}ms) command", method_clone.delay);
-                let procedure_result = invoke_method(&method_clone, &arguments);
+                let procedure_result = method_clone.invoke(&arguments);
                 info!("Delayed execution finished: {:?}", procedure_result);
             });
             //This method support only utf-8 (we just spit whole json from config...)
             return Ok(fake_response.clone());
         } else {
-            return invoke_method(&method, &arguments);
+            return method.invoke(&arguments);
         }
     }
 }
 
-pub fn get_invoke_arguments(exec_params: &Vec<MethodParam>,
+pub fn get_invoke_arguments(exec_params: &[MethodParam],
                             params: &Json) -> Result<Vec<String>, ()> {
     let mut arguments = Vec::new();
     for arg in exec_params {

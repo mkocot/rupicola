@@ -39,7 +39,9 @@ use rpc::{RpcHandler, get_invoke_arguments};
 use handlers::{HandlerError, ResponseHandler};
 
 struct SenderHandler {
+    /// RPC handler
     json_rpc: JsonRpcServer<RpcHandler>,
+    /// Server configuration
     config: ServerConfig,
 }
 
