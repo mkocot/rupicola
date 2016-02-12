@@ -33,6 +33,8 @@ use std::process::{Command, Stdio};
 use std::os::unix::process::CommandExt;
 use std::env;
 use getopts::Options;
+use std::sync::{Arc, Barrier};
+use std::thread;
 
 use lazy_response::LazyResponse;
 use rpc::{RpcHandler, get_invoke_arguments};
@@ -42,7 +44,9 @@ struct SenderHandler {
     /// RPC handler
     json_rpc: JsonRpcServer<RpcHandler>,
     /// Server configuration
-    config: ServerConfig,
+    config: Arc<ServerConfig>,
+    /// Allow executing private methods from this server instance
+    allow_private: bool,
 }
 
 impl ResponseHandler for SenderHandler {
@@ -124,17 +128,22 @@ impl Handler for SenderHandler {
         // if request is from loopback and requested method is private
         // skip this check
         let is_authorized = self.is_request_authorized(&req);
-        let is_loopback = match req.remote_addr {
-            std::net::SocketAddr::V4(addr) => {
-                // Special case: 0.0.0.0:0 -> Unix domain socket
-                // Check for 0.0.0.0 is done by 'is_unspecified'
-                addr.port() == 0 && addr.ip().is_unspecified() || addr.ip().is_loopback()
-            },
-            std::net::SocketAddr::V6(addr) => addr.ip().is_loopback(),
-        };
+
+        // Each bind point have it's own permission for loopback requests
+        // without checking auth
+        let is_loopback = if self.allow_private {
+            match req.remote_addr {
+                std::net::SocketAddr::V4(addr) => {
+                    // Special case: 0.0.0.0:0 -> Unix domain socket
+                    // Check for 0.0.0.0 is done by 'is_unspecified'
+                    addr.port() == 0 && addr.ip().is_unspecified() || addr.ip().is_loopback()
+                },
+                std::net::SocketAddr::V6(addr) => addr.ip().is_loopback(),
+            }
+        } else { false };
 
         if is_loopback {
-            info!("Response from loopback");
+            info!("Response from loopback is allowed");
         }
 
         // Enable this check early for normal requests
@@ -210,13 +219,14 @@ impl Handler for SenderHandler {
 }
 
 impl SenderHandler {
-    fn new(conf: ServerConfig) -> SenderHandler {
+    fn new(conf: Arc<ServerConfig>, allow_private: bool) -> SenderHandler {
         // Dont like it...
         let json_handler = RpcHandler::new(conf.methods.clone());
 
         SenderHandler {
             json_rpc: JsonRpcServer::new_handler(json_handler),
             config: conf,
+            allow_private: allow_private
         }
     }
 
@@ -250,6 +260,7 @@ impl SenderHandler {
                         arguments: &[String],
                         streaming_response: &mut Write)
                         -> std::io::Result<()> {
+        use std::sync::mpsc::channel;
         // Spawn child object
         let mut base_command = Command::new(&method.path);
         let command = {
@@ -270,21 +281,108 @@ impl SenderHandler {
             try!(child_process.kill());
             return Ok(());
         };
-
-        // Read as bytes chunks
-        let mut read_buffer = [0; 2048];
-        while let Ok(read) = reader.read(&mut read_buffer[..]) {
-            if read == 0 {
-                info!("End of stream");
-                break;
+        // Le't push data from reading thread to main thread using channels
+        // this will be much cleaner than fiddling with mutexes on it's own
+        let (tx, rx) = channel();
+        thread::spawn(move || {
+            let mut buffer = [0; 2048];
+            loop {
+                // it's ok to panic, we catch this event in Err(_) branch
+                let result = reader.read(&mut buffer[..]).unwrap();
+                tx.send((buffer, result)).unwrap();
+                if result == 0 {
+                    break;
+                }
             }
-            try!(streaming_response.write(&read_buffer[0..read]));
-            try!(streaming_response.flush());
+        });
+
+        // TODO: This is ugly and hacky implementation
+        let hard_limit_wait = method.limits.read_timeout;
+        let mut total_wait_time = 0;
+        loop {
+            match rx.try_recv() {
+                Ok((ref data, size)) => { 
+                    // Reset sleep timer every time we get data
+                    total_wait_time = 0;
+                    if size > 0 { 
+                        try!(streaming_response.write_all(&data[0..size]));
+                        try!(streaming_response.flush());
+                    } else {
+                        info!("End Of Stream");
+                    }
+                },
+                Err(std::sync::mpsc::TryRecvError::Empty) => {
+                    // This is ugly ... 
+                    let wait_timeout = std::time::Duration::new(1, 0);
+                    // This is inaccurate as hell
+                    total_wait_time += 1000;
+                    thread::sleep(wait_timeout);
+                    if hard_limit_wait > 0 && total_wait_time > hard_limit_wait {
+                        warn!("Timeout while waiting for data");
+                        break;
+                    }
+                },
+                Err(_) => {
+                    info!("Channel borked");
+                    break;
+                }
+            }
         }
 
         Ok(())
     }
 
+}
+
+impl Protocol {
+    pub fn listen(&self, config: Arc<ServerConfig>, barrier: Arc<Barrier>)
+            -> thread::JoinHandle<()> {
+        match *self {
+            Protocol::Https { ref address, ref port, ref cert, ref key, ref allow_private } => {
+                let address = address.clone();
+                let port = port.clone();
+                let cert = cert.clone();
+                let key = key.clone();
+                let allow_private = allow_private.clone();
+                thread::spawn(move || {
+                    // TODO: Manual create context
+                    //      default values use vulnerable SSLv2, SSLv3
+                    let ssl = Openssl::with_cert_and_key(cert, key).unwrap();
+                    match Server::https((&address as &str, port), ssl).and_then(
+                            |s|s.handle(SenderHandler::new(config, allow_private))) {
+                        Ok(_) => info!("HTTPS listener started: {}@{}", address, port),
+                        Err(e) => error!("Failed listening HTTPS {}@{}: {}", address, port, e),
+                    }
+                        barrier.wait();
+                })
+            },
+            Protocol::Http { ref address, ref port, ref allow_private } => {
+                let address = address.clone();
+                let port = port.clone();
+                let allow_private = allow_private.clone();
+                thread::spawn(move || {
+                    match Server::http((&address as &str, port)).and_then(|s|
+                            s.handle(SenderHandler::new(config, allow_private))) {
+                        Ok(_) => info!("HTTP listener started: {}@{}", address, port),
+                        Err(e) => error!("Failed listening HTTP {}@{}: {}", address, port, e),
+                    }
+                    barrier.wait();
+                })
+            },
+            Protocol::Unix { ref address, ref allow_private } => {
+                let address = address.clone();
+                let allow_private = allow_private.clone();
+                thread::spawn(move || {
+                    match UnixSocketServer::new(&address).and_then(|s|
+                            s.handle(SenderHandler::new(config, allow_private))) {
+                        Ok(_) => info!("Unix listener started: {}", address),
+                        Err(e) => error!("Failed listening UNIX {}: {}", address, e),
+                    }
+                    barrier.wait();
+                })
+            },
+        }
+    }
 }
 
 /**
@@ -315,29 +413,19 @@ fn main() {
     }
 
     let config_file = matches.opt_str("c").unwrap_or("/etc/jsonrpcd/jsonrpcd.conf".to_owned());
-    let config = ServerConfig::read_from_file(&config_file);
-    // set_log_level(config.log_level);
-    match config.protocol_definition.protocol.clone() {
-        Protocol::Https { ref address, ref port, ref cert, ref key } => {
-            // TODO: Manual create context
-            //      default values use vulnerable SSLv2, SSLv3
-            let ssl = Openssl::with_cert_and_key(cert, key).unwrap();
-            Server::https((address as &str, *port), ssl)
-                .unwrap()
-                .handle(SenderHandler::new(config))
-                .unwrap();
-        }
-        Protocol::Http { ref address, ref port } => {
-            Server::http((address as &str, *port))
-                .unwrap()
-                .handle(SenderHandler::new(config))
-                .unwrap();
-        }
-        Protocol::Unix { ref address } => {
-            UnixSocketServer::new(address)
-                .unwrap()
-                .handle(SenderHandler::new(config))
-                .unwrap();
-        }
+
+    info!("Starting parsing configuration");
+    let config = Arc::new(ServerConfig::read_from_file(&config_file));
+
+    // Barrier will wait for 2 signals before proceeding further
+    // this mean 1 signal is always from main thread, and second one only
+    // if any listening thread will fail
+    info!("Starting listeners");
+    let barrier = Arc::new(Barrier::new(2));
+    for protocol in config.protocol_definition.bind.iter() {
+        protocol.listen(config.clone(), barrier.clone());
     }
+    // Beyond this point is only The Land of Bork
+    barrier.wait();
+    warn!("Atleast one listening thread failed! Exiting now!");
 }

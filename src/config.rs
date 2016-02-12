@@ -49,6 +49,7 @@ pub enum Protocol {
     Http {
         address: String,
         port: u16,
+        allow_private: bool,
     },
 
     Https {
@@ -56,10 +57,12 @@ pub enum Protocol {
         port: u16,
         cert: String,
         key: String,
+        allow_private: bool,
     },
 
     Unix {
         address: String,
+        allow_private: bool,
     },
 }
 
@@ -83,7 +86,7 @@ impl Limits {
 }
 
 pub struct ProtocolDefinition {
-    pub protocol: Protocol,
+    pub bind: Vec<Protocol>,
     pub auth: AuthMethod,
     pub stream_path: String,
     pub rpc_path: String,
@@ -246,67 +249,89 @@ fn set_log_level(level: log::LogLevelFilter, backend: &str, path: Option<&str>) 
 }
 
 impl ServerConfig {
+    fn parse_bind_point(protocol_definition: &Yaml) -> Result<Protocol, ()> {
+        if let Some(protocol_type) = protocol_definition["type"].as_str() {
+            let address = if let Some(addr) = protocol_definition["address"].as_str() {
+                info!("Address: {}", addr);
+                addr.to_owned()
+            } else {
+                warn!("No bindpoint! Using 127.0.0.1");
+                "127.0.0.1".to_owned()
+            };
+
+            let port = if let Some(port) = protocol_definition["port"].as_i64() {
+                info!("Port: {}", port);
+                port as u16
+            } else {
+                // This is error only if protocol is != Unix
+                if protocol_type != "unix" {
+                    error!("No port defined!");
+                    return Err(());
+                }
+                // just return "random" value it will never be used anyway
+                0
+            };
+
+            info!("Protocol type: {}", protocol_type);
+            let allow_private = protocol_definition["allow_private"].as_bool().unwrap_or(false);
+            let cert = protocol_definition["cert"].as_str().map(str::to_owned);
+            let key = protocol_definition["key"].as_str().map(str::to_owned);
+            if protocol_type == "https" && (cert.is_none() || key.is_none()) {
+                if cert.is_none() || key.is_none() {
+                    error!("Requested https but not provided private key and certificate!");
+                    return Err(());
+                } else {
+                    return Ok(Protocol::Https {
+                        address: address,
+                        port: port,
+                        key: key.unwrap(),
+                        cert: cert.unwrap(),
+                        allow_private: allow_private,
+                    });
+                }
+            } else if protocol_type == "http" {
+                return Ok(Protocol::Http {
+                    address: address,
+                    port: port,
+                    allow_private: allow_private,
+                });
+            } else if protocol_type == "unix" {
+                return Ok(Protocol::Unix {
+                    address: address,
+                    allow_private: allow_private,
+                });
+            } else {
+                error!("Invalid protocol type '{}'!", protocol_type);
+                return Err(());
+            }
+        } else {
+            error!("No protocol type! Using HTTP");
+            return Err(());
+        }
+    }
     pub fn parse_protocol_definition(config: &Yaml) -> Result<ProtocolDefinition, ()> {
         let protocol_definition = &config["protocol"];
         let auth;
-        let protocol;
+        let bind_points;
         if config["protocol"].as_hash().is_some() {
             info!("Parsing protocol definition");
-            if let Some(protocol_type) = protocol_definition["type"].as_str() {
-                let address = if let Some(addr) = protocol_definition["address"].as_str() {
-                    info!("Address: {}", addr);
-                    addr.to_owned()
-                } else {
-                    warn!("No bindpoint! Using 127.0.0.1");
-                    "127.0.0.1".to_owned()
-                };
-
-                let port = if let Some(port) = protocol_definition["port"].as_i64() {
-                    info!("Port: {}", port);
-                    port as u16
-                } else {
-                    // This is error only if protocol is != Unix
-                    if protocol_type != "unix" {
-                        error!("No port defined!");
-                        return Err(());
-                    }
-                    // just return "random" value it will never be used anyway
-                    0
-                };
-
-                info!("Protocol type: {}", protocol_type);
-                let cert = protocol_definition["cert"].as_str().map(|o| o.to_owned());
-                let key = protocol_definition["key"].as_str().map(|o| o.to_owned());
-                if protocol_type == "https" && (cert.is_none() || key.is_none()) {
-                    if cert.is_none() || key.is_none() {
-                        error!("Requested https but not provided private key and certificate!");
-                        return Err(());
-                    } else {
-                        protocol = Protocol::Https {
-                            address: address,
-                            port: port,
-                            key: key.unwrap(),
-                            cert: cert.unwrap(),
-                        };
-                    }
-                } else if protocol_type == "http" {
-                    protocol = Protocol::Http {
-                        address: address,
-                        port: port,
-                    };
-                } else if protocol_type == "unix" {
-                    protocol = Protocol::Unix {
-                        address: address,
-                    };
-                } else {
-                    error!("Invalid protocol type '{}'!", protocol_type);
+            // Get all bind points
+            let points = protocol_definition["bind"].as_vec().map(|v| {
+                let x: Vec<_> = v.iter().filter_map(|e| Self::parse_bind_point(e).ok() ).collect();
+                x
+            });
+            bind_points = match points {
+                None => {
+                    error!("Required field 'bind' is missing");
                     return Err(());
-                }
-            } else {
-                error!("No protocol type! Using HTTP");
-                return Err(());
-            }
-            // we want basic auth?
+                },
+                Some(ref s) if s.is_empty() => {
+                    error!("Unable to parse at least one bind point!");
+                    return Err(());
+                },
+                Some(s) => s
+            };
+            
             let basic_auth_config = &protocol_definition["auth-basic"];
             auth = if !basic_auth_config.is_badvalue() {
                 let login = if let Some(s) = basic_auth_config["login"].as_str() {
@@ -350,7 +375,7 @@ impl ServerConfig {
         }
         // Parse limits
         let proto_def = ProtocolDefinition {
-            protocol: protocol,
+            bind: bind_points,
             auth: auth,
             rpc_path: config["uri"]["rpc"].as_str().unwrap_or("/jsonrpc").to_owned(),
             stream_path: config["uri"]["streamed"].as_str().unwrap_or("/streaming").to_owned(),
