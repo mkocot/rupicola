@@ -13,6 +13,7 @@ yaml-rust = "^0.3"
 clippy = {version = "*", optional = true}
 openssl = "^0.7"
 hyperlocal = "^0.1"
+libc = "^0"
 
 [dependencies.jsonrpc]
 git = "https://bitbucket.org/kociolek/jsonrpc.git"

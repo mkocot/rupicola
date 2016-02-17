@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::io::Read;
 use std::collections::{HashMap, VecDeque, BTreeMap};
 use std::fs::File;
-use std::os::unix::raw::{gid_t, uid_t};
+use std::os::unix::raw::{gid_t, uid_t, mode_t};
 use openssl::crypto::hash::{hash as hash_fn, Type};
 use log::{LogRecord, LogLevelFilter, LogMetadata};
 use yaml_rust::{YamlLoader, Yaml};
@@ -63,6 +63,8 @@ pub enum Protocol {
     Unix {
         address: String,
         allow_private: bool,
+        file_mode: Option<mode_t>,
+        file_owner: Option<(uid_t, gid_t)>,
     },
 }
 
@@ -71,7 +73,8 @@ pub struct Limits {
     pub read_timeout: u32,
     pub exec_timeout: u32,
     pub payload_size: u32,
-    pub max_response: u32
+    pub max_response: u32,
+    pub request_wait: u32,
 }
 
 impl Limits {
@@ -81,6 +84,7 @@ impl Limits {
             exec_timeout: 0,
             payload_size: 5242880,
             max_response: 5242880,
+            request_wait: 30000,
         }
     }
 }
@@ -296,9 +300,19 @@ impl ServerConfig {
                     allow_private: allow_private,
                 });
             } else if protocol_type == "unix" {
+                let uid = protocol_definition["gid"].as_i64();
+                let gid = protocol_definition["uid"].as_i64();
+                let chmod = protocol_definition["mode"].as_str();//TODO: from octal to dec
+                let file_owner = match (uid, gid) {
+                    (Some(uid), Some(gid)) => Some((uid as uid_t, gid as gid_t)),
+                    _ => None,
+                };
+                let file_mode = None;
                 return Ok(Protocol::Unix {
                     address: address,
                     allow_private: allow_private,
+                    file_owner: file_owner,
+                    file_mode: file_mode,
                 });
             } else {
                 error!("Invalid protocol type '{}'!", protocol_type);
@@ -445,6 +459,7 @@ fn parse_limits(node: &Yaml, proto: &Limits) -> Limits {
         exec_timeout: node["exec-timeout"].as_i64().map_or(proto.exec_timeout, |i|i as u32),
         payload_size: node["payload-size"].as_i64().map_or(proto.payload_size, |i|i as u32),
         max_response: node["max-response"].as_i64().map_or(proto.max_response, |i|i as u32),
+        request_wait: node["request-wait"].as_i64().map_or(proto.request_wait, |i|i as u32),
     }
 }
 
@@ -630,6 +645,7 @@ fn parse_method(method_name: &Yaml, method_def: &Yaml, default_limits: &Arc<Limi
                 let param_type = match definition_it["type"].as_str().unwrap_or("") {
                     "string" => ParameterType::String,
                     "number" => ParameterType::Number,
+                    "bool" => ParameterType::Bool,
                     _ => {
                         return Err(format!("No parameter type or invalid value for {:?}", name));
                     }

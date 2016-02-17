@@ -6,6 +6,7 @@ mod params;
 mod handlers;
 mod lazy_response;
 mod rpc;
+mod ufile;
 
 // External dependencies
 extern crate openssl;
@@ -28,13 +29,14 @@ use hyper::header::{Authorization, Basic};
 use hyperlocal::UnixSocketServer;
 use jsonrpc::JsonRpcServer;
 use rustc_serialize::json::Json;
+use std::{env, thread};
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 use std::os::unix::process::CommandExt;
-use std::env;
-use getopts::Options;
+use std::os::unix::fs::PermissionsExt;
 use std::sync::{Arc, Barrier};
-use std::thread;
+use getopts::Options;
+use std::time::Duration;
 
 use lazy_response::LazyResponse;
 use rpc::{RpcHandler, get_invoke_arguments};
@@ -51,19 +53,13 @@ struct SenderHandler {
 
 impl ResponseHandler for SenderHandler {
     fn handle_response(&self,
-                       req: &mut Read,
-                       res: &mut Write,
-                       is_auth: bool) -> Result<(), HandlerError> {
+                       req: &str,
+                       is_auth: bool,
+                       res: &mut Write) -> Result<(), HandlerError> {
         // Read streaming method name from path
         // POST /streaming
-        let mut request_str = String::new();
-        // TODO: Limit read size
-        if let Err(e) = req.read_to_string(&mut request_str) {
-            error!("Reading request failed {:?}", e);
-            return Err(HandlerError::InvalidRequest);
-        }
-        info!("--> {}", request_str);
-        let request_json = match Json::from_str(&request_str) {
+        info!("--> {}", req);
+        let request_json = match Json::from_str(&req) {
             Ok(s) => s,
             Err(e) => {
                 error!("Invalid JSON request: {:?}", e);
@@ -77,7 +73,6 @@ impl ResponseHandler for SenderHandler {
             &empty
         };
 
-        //let params = &request_json["params"];
         let method_name = if let Some(s) = request_json["method"].as_string() {
             s
         } else {
@@ -125,6 +120,12 @@ impl Handler for SenderHandler {
               req.remote_addr,
               req.method,
               req.uri);
+        // Enforce request read timeout
+        if self.config.default_limits.request_wait != 0 {
+            if let Err(e) = req.set_read_timeout(Some(Duration::from_millis(self.config.default_limits.request_wait.into()))) {
+                warn!("Changing timeout for request failed: {}", e);
+            }
+        }
         // if request is from loopback and requested method is private
         // skip this check
         let is_authorized = self.is_request_authorized(&req);
@@ -164,7 +165,7 @@ impl Handler for SenderHandler {
             // 1) Check payload size in header
             // this is sufficient as hyper relies on that
             if let Some(&hyper::header::ContentLength(size)) = req.headers.get::<hyper::header::ContentLength>() {
-                if size > self.config.default_limits.payload_size as u64 {
+                if size > self.config.default_limits.payload_size.into() {
                     error!("Request is too big! ({} > {})",
                             size, self.config.default_limits.payload_size);
                 }
@@ -172,16 +173,25 @@ impl Handler for SenderHandler {
                 error!("Required header: ContentLength is missing!");
             }
 
+            let mut request_str = String::new();
+            let req_result = req.read_to_string(&mut request_str);
+
+            info!("Processing request: {}", request_str);
             let path = path as &str;
             let mut lazy = LazyResponse::new(res);
-            let response = if self.config.protocol_definition.stream_path == path {
-                self.handle_response(&mut req, &mut lazy, is_authorized)
-            } else if self.config.protocol_definition.rpc_path == path {
-                lazy.enable_buffer();
-                self.json_rpc.handle_response(&mut req, &mut lazy, is_authorized)
+            let response = if let Err(e) = req_result {
+                error!("Unable to obtain request data: {}", e);
+                Err(HandlerError::InvalidRequest)
             } else {
-                error!("Unknown request path: {}", path);
-                Err(HandlerError::NoSuchMethod)
+                if self.config.protocol_definition.stream_path == path {
+                    self.handle_response(&request_str, is_authorized, &mut lazy)
+                } else if self.config.protocol_definition.rpc_path == path {
+                    lazy.enable_buffer();
+                    self.json_rpc.handle_response(&request_str, is_authorized, &mut lazy)
+                } else {
+                    error!("Unknown request path: {}", path);
+                    Err(HandlerError::NoSuchMethod)
+                }
             };
 
             if let Err(err) = response {
@@ -205,6 +215,7 @@ impl Handler for SenderHandler {
                         warn!("Lazy response should be in FRESH state!");
                     }
                     LazyResponse::NONE => {
+                        error!("Ok somehow somehing is broken hard");
                         unreachable!();
                     }
                 }
@@ -369,13 +380,49 @@ impl Protocol {
                     barrier.wait();
                 })
             },
-            Protocol::Unix { ref address, ref allow_private } => {
+            Protocol::Unix { ref address, ref allow_private, ref file_mode, ref file_owner } => {
                 let address = address.clone();
                 let allow_private = allow_private.clone();
+                let file_mode = file_mode.clone();
+                let file_owner = file_owner.clone();
                 thread::spawn(move || {
+                    // Try unbind
+                    if let Err(e) = std::fs::remove_file(&address) {
+                        info!("Unlink file failed: {}", e);
+                    }
                     match UnixSocketServer::new(&address).and_then(|s|
                             s.handle(SenderHandler::new(config, allow_private))) {
-                        Ok(_) => info!("Unix listener started: {}", address),
+                        Ok(mut l) => {
+                            info!("Unix listener started: {}", address);
+                            if let Some(file_mode) = file_mode {
+                                // Ok now correct permissions for socket
+                                // TODO: configure target
+                                let x = std::fs::metadata(&address).and_then(|p| {
+                                    let mut p = p.permissions();
+                                    p.set_mode(file_mode);
+                                    std::fs::set_permissions(&address, p)
+                                });
+                                if let Err(e) = x {
+                                    error!("Unable to set permission for {}: {}", address, e);
+                                    let _ = l.close();
+                                }
+                            }
+
+                            if let Some((uid, gid)) = file_owner {
+                                // file uid gid
+                                match ufile::chown(address, uid, gid) {
+                                    Ok(o) if o == -1 => {
+                                        let _ = l.close();
+                                        error!("Socket path is invalid!");
+                                    },
+                                    Err(e) => {
+                                        error!("Unable to set socket owner: {}", e);
+                                        let _ = l.close();
+                                    },
+                                    Ok(_) => {},
+                                }
+                            }
+                        },
                         Err(e) => error!("Failed listening UNIX {}: {}", address, e),
                     }
                     barrier.wait();

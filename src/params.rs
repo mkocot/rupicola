@@ -2,6 +2,7 @@ use rustc_serialize::json::{ToJson, Json};
 use config::ParameterDefinition;
 use std::sync::Arc;
 
+/// Definition of possible method parameter
 #[derive(Debug, Clone)]
 pub enum MethodParam {
     /// This is just constant string
@@ -13,11 +14,15 @@ pub enum MethodParam {
     /// Capture all params as one-line json string
     Everything,
 }
-//Helper trait for cleaner implementation
+
+///Helper trait for cleaner implementation
 pub trait Unroll {
+    /// Unroll self given set of parameters
     fn unroll(&self, params: &Json) -> Result<Option<String>, ()>;
 }
 
+/// Implementation of Unroll traif for parameter
+/// This simplifies handling validation of parameters into single function
 impl Unroll for ParameterDefinition {
     fn unroll(&self, params: &Json) -> Result<Option<String>, ()> {
         // get info from params
@@ -43,26 +48,6 @@ impl Unroll for ParameterDefinition {
     }
 }
 
-impl Unroll for Vec<MethodParam> {
-    fn unroll(&self, params: &Json) -> Result<Option<String>, ()> {
-        let mut result = String::new();
-
-        for element in self.iter() {
-            match element.unroll(params) {
-                Ok(Some(ref o)) => result.push_str(o),
-                skip @Ok(None) | skip @Err(_) => {
-                    if skip.is_ok() {
-                        info!("Optional variable {:?} is missing. Skip whole chain", element);
-                    }
-                    // Return either Ok(None) or Err(..)
-                    return skip;
-                }
-            }
-        }
-        Ok(Some(result))
-    }
-}
-
 impl Unroll for MethodParam {
     fn unroll(&self, params: &Json) -> Result<Option<String>, ()> {
         match *self {
@@ -83,7 +68,22 @@ impl Unroll for MethodParam {
                     all => all,
                 }
             },
-            MethodParam::Chained(ref c) => c.unroll(params),
+            MethodParam::Chained(ref c) => {
+                let mut result = String::new();
+                for element in c.iter() {
+                    match element.unroll(params) {
+                        Ok(Some(ref o)) => result.push_str(o),
+                        skip @Ok(None) | skip @Err(_) => {
+                            if skip.is_ok() {
+                                info!("Optional variable {:?} is missing. Skip whole chain", element);
+                            }
+                            // Return either Ok(None) or Err(..)
+                            return skip;
+                        }
+                    }
+                }
+                Ok(Some(result))
+            },
         }
     }
 }

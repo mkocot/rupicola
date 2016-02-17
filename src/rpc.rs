@@ -184,18 +184,12 @@ pub fn get_invoke_arguments(exec_params: &[MethodParam],
 
 impl ResponseHandler for JsonRpcServer<RpcHandler> {
     fn handle_response(&self,
-                       req: &mut Read,
-                       res: &mut Write,
-                       is_auth: bool) -> Result<(), HandlerError> {
-        let mut request = String::new();
-        if req.read_to_string(&mut request).is_err() {
-            warn!("Unable to read request");
-            return Err(HandlerError::InvalidRequest);
-        }
-        info!("Processing request: {}", request);
+                       req: &str,
+                       is_auth: bool,
+                       res: &mut Write) -> Result<(), HandlerError> {
         let mut custom_data = HashMap::new();
         custom_data.insert("is_auth", is_auth.to_json());
-        let response = self.handle_request_custom(&request, Some(&custom_data));
+        let response = self.handle_request_custom(&req, Some(&custom_data));
         if let Some(response) = response {
             info!("Response: {}", response);
             if let Err(e) = res.write(&response.into_bytes()) {
