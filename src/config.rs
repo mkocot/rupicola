@@ -13,6 +13,7 @@ use openssl::crypto::hash::{hash as hash_fn, Type};
 use log::{LogRecord, LogLevelFilter, LogMetadata};
 use yaml_rust::{YamlLoader, Yaml};
 use syslog::Facility;
+use ufile;
 
 pub enum PassType {
     Plain(String),
@@ -63,8 +64,9 @@ pub enum Protocol {
     Unix {
         address: String,
         allow_private: bool,
-        file_mode: Option<mode_t>,
-        file_owner: Option<(uid_t, gid_t)>,
+        file_mode: mode_t,
+        file_owner_gid: gid_t,
+        file_owner_uid: uid_t,
     },
 }
 
@@ -300,18 +302,36 @@ impl ServerConfig {
                     allow_private: allow_private,
                 });
             } else if protocol_type == "unix" {
-                let uid = protocol_definition["gid"].as_i64();
-                let gid = protocol_definition["uid"].as_i64();
-                let chmod = protocol_definition["mode"].as_str();//TODO: from octal to dec
-                let file_owner = match (uid, gid) {
-                    (Some(uid), Some(gid)) => Some((uid as uid_t, gid as gid_t)),
-                    _ => None,
+                let uid = protocol_definition["uid"].as_i64().map(|g|g as uid_t);
+                let gid = protocol_definition["gid"].as_i64().map(|g|g as gid_t);
+                // This Is Silly! Unable to convert value to string... 
+                let file_mode = protocol_definition["mode"].as_i64().and_then(|mode| {
+                    match u32::from_str_radix(&format!("{}", mode), 8) {
+                        Ok(m) if m <= 0o777 => Some(m),
+                        Ok(_) => {
+                            info!("Invalid mode: {}", mode);
+                            None
+                        }
+                        Err(e) => {
+                            info!("Conversion for mode failed: {}", e);
+                            None
+                        }
+                    }
+                }).unwrap_or_else(|| {
+                    info!("Using default mode for socket");
+                    0o666
+                });
+                let (file_owner_uid, file_owner_gid) = match (uid, gid) {
+                    (Some(uid), Some(gid)) => (uid, gid),
+                    (Some(uid), None) => (uid, ufile::getgid()),
+                    (None, Some(gid)) => (ufile::getuid(), gid),
+                    (None, None) => (ufile::getuid(), ufile::getgid()),
                 };
-                let file_mode = None;
                 return Ok(Protocol::Unix {
                     address: address,
                     allow_private: allow_private,
-                    file_owner: file_owner,
+                    file_owner_uid: file_owner_uid,
+                    file_owner_gid: file_owner_gid,
                     file_mode: file_mode,
                 });
             } else {
