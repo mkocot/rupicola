@@ -15,12 +15,17 @@ use yaml_rust::{YamlLoader, Yaml};
 use syslog::Facility;
 use ufile;
 
+/// Stored password type
 pub enum PassType {
+    /// Plaintex
     Plain(String),
+    /// Hashed using MD5 as base function
     Md5(String),
+    /// Hashed using SHA1 as base function
     Sha1(String),
 }
 
+/// Implement validation method for given password storage
 impl PassType {
     pub fn validate(&self, pass: &str) -> bool {
         match *self {
@@ -37,45 +42,70 @@ impl PassType {
     }
 }
 
+/// Access control method
 pub enum AuthMethod {
+    /// No checking for any permissions
     None,
+    /// Check permission based on login and hashed (recommended) password
     Basic {
+        /// Login
         login: String,
+        /// Selected password checking method
         pass: PassType,
     },
 }
 
+/// Internal protocol details required to start server
 #[derive(Clone)]
 pub enum Protocol {
+    /// Base version using TCP listener
     Http {
+        /// Listening address
         address: String,
+        /// Listening port
         port: u16,
+        /// Allow using private methods from loopback
         allow_private: bool,
     },
-
+    /// Extended version using TCP listener and SSL
     Https {
+        /// Listening address
         address: String,
+        /// Listening port
         port: u16,
+        /// Path to PK8 cert
         cert: String,
+        /// Path to PK8 private key
         key: String,
+        /// Allow using private methods from loopback
         allow_private: bool,
     },
-
+    /// Unix domain socket based version
     Unix {
         address: String,
+        /// Allow using private methods from loopback
         allow_private: bool,
+        /// Mode to set on socket after creating
         file_mode: mode_t,
+        /// Changing group ownership of socket
         file_owner_gid: gid_t,
+        /// Changing ownership of socket
         file_owner_uid: uid_t,
     },
 }
 
+/// Limits used by various methods
 #[derive(Clone, Debug)]
 pub struct Limits {
+    /// Maximum time delay between reading data from external function.
     pub read_timeout: u32,
+    /// Maximum procedure invocation time in ms. Set to 0 to disable.
     pub exec_timeout: u32,
+    /// Maximum request size in bytes. Set to 0 to disable.
     pub payload_size: u32,
+    /// Maximum response size in bytes. Set to 0 to disable.
     pub max_response: u32,
+    /// Maximum waiting time for client request (in ms). Set 0 to disable.
     pub request_wait: u32,
 }
 
@@ -91,13 +121,19 @@ impl Limits {
     }
 }
 
+/// Server bindpoint and auth method
 pub struct ProtocolDefinition {
+    /// Listening bindpoints
     pub bind: Vec<Protocol>,
+    /// Auth method
     pub auth: AuthMethod,
+    /// Path for streaming functions
     pub stream_path: String,
+    /// Path for RPC functions
     pub rpc_path: String,
 }
 
+/// Server configuration
 pub struct ServerConfig {
     pub protocol_definition: ProtocolDefinition,
     pub methods: HashMap<String, MethodDefinition>,

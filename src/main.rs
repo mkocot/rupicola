@@ -1,4 +1,4 @@
-#![feature(ip, into_cow)]
+#![feature(ip)]
 
 // Local files/dependencies
 mod config;
@@ -30,7 +30,6 @@ use hyperlocal::UnixSocketServer;
 use jsonrpc::JsonRpcServer;
 use rustc_serialize::json::Json;
 use std::{env, thread};
-use std::borrow::{Borrow, IntoCow};
 use std::io::{Read, Write};
 use std::process::{Command, Stdio};
 use std::os::unix::process::CommandExt;
@@ -350,12 +349,10 @@ impl Protocol {
     pub fn listen(&self, config: Arc<ServerConfig>, barrier: Arc<Barrier>)
             -> thread::JoinHandle<()> {
         match *self {
-            Protocol::Https { ref address, ref port, ref cert, ref key, ref allow_private } => {
+            Protocol::Https { ref address, port, ref cert, ref key, allow_private } => {
                 let address = address.clone();
-                let port = port.clone();
                 let cert = cert.clone();
                 let key = key.clone();
-                let allow_private = allow_private.clone();
                 thread::spawn(move || {
                     // TODO: Manual create context
                     //      default values use vulnerable SSLv2, SSLv3
@@ -368,10 +365,8 @@ impl Protocol {
                         barrier.wait();
                 })
             },
-            Protocol::Http { ref address, ref port, ref allow_private } => {
+            Protocol::Http { ref address, port, allow_private } => {
                 let address = address.clone();
-                let port = port.clone();
-                let allow_private = allow_private.clone();
                 thread::spawn(move || {
                     match Server::http((&address as &str, port)).and_then(|s|
                             s.handle(SenderHandler::new(config, allow_private))) {
@@ -381,51 +376,41 @@ impl Protocol {
                     barrier.wait();
                 })
             },
-            Protocol::Unix { ref address, ref allow_private, file_mode, 
+            Protocol::Unix { ref address, allow_private, file_mode, 
                     file_owner_uid, file_owner_gid } => {
-
-                let address = address.clone().into_cow();
-                let allow_private = allow_private.clone();
+                let address = address.clone();
                 // Try unbind, or just merilly triple over it?
-                if let Err(e) = std::fs::remove_file(address.borrow() as &str) {
+                if let Err(e) = std::fs::remove_file(&address) {
                     info!("Unlink file failed: {}", e);
                 }
                 thread::spawn(move || {
-                    let address: &str = address.borrow();
-                    match UnixSocketServer::new(address).and_then(|s|
+                    match UnixSocketServer::new(&address).and_then(|s|
                             s.handle(SenderHandler::new(config, allow_private))) {
                         Ok(mut l) => {
-                            info!("Unix listener started: {}", address);
+                            info!("Unix listener started: {}", &address);
 
                             // Ok now correct permissions for socket
-                            let x = std::fs::metadata(&address).and_then(|p| {
+                            if let Err(e) = std::fs::metadata(&address).and_then(|p| {
                                 let mut p = p.permissions();
                                 p.set_mode(file_mode);
                                 std::fs::set_permissions(&address, p)
-                            });
-                            if let Err(e) = x {
-                                error!("Unable to set permission for {}: {}", address, e);
+                            }) {
+                                error!("Unable to set permission for {}: {}", &address, e);
                                 let _ = l.close();
                             }
+
                             // file uid gid
-                            match ufile::chown(address, file_owner_uid, file_owner_gid) {
-                                Ok(o) if o == -1 => {
-                                    let _ = l.close();
-                                    error!("Socket path is invalid!");
-                                },
-                                Err(e) => {
-                                    error!("Unable to set socket owner: {}", e);
-                                    let _ = l.close();
-                                },
-                                Ok(_) => {},
+                            if let Err(e) = ufile::chown(&address, file_owner_uid, file_owner_gid) {
+                                error!("Unable to set socket owner: {}", e);
+                                let _ = l.close();
                             }
                         },
-                        Err(e) => error!("Failed listening UNIX {}: {}", address, e),
+                        Err(e) => error!("Failed listening UNIX {}: {}", &address, e),
                     }
                     
                     // Clean after
-                    if let Err(e) = std::fs::remove_file(address) {
-                        info!("Removing socket ({}) failed: {}", address, e);
+                    if let Err(e) = std::fs::remove_file(&address) {
+                        info!("Removing socket ({}) failed: {}", &address, e);
                     }
                     barrier.wait();
                 })

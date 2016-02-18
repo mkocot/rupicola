@@ -17,7 +17,6 @@ fn cvt(v: libc::c_int) -> io::Result<libc::c_int> {
 }
 
 /// Change file ownership
-/// return Ok(-1) if conversion to 
 pub fn chown<P: AsRef<Path>> (path: P, uid: uid_t, gid: gid_t) -> io::Result<i32> {
     let cstring = try!(CString::new(path.as_ref().as_os_str().as_bytes()));
     unsafe {
@@ -25,10 +24,12 @@ pub fn chown<P: AsRef<Path>> (path: P, uid: uid_t, gid: gid_t) -> io::Result<i32
     }
 }
 
+/// Get current process UID
 pub fn getuid() -> uid_t {
     unsafe { libc::getuid() }
 }
 
+/// Get current process GID
 pub fn getgid() -> gid_t {
     unsafe { libc::getgid() }
 }
