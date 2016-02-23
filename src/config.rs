@@ -6,8 +6,9 @@ use rustc_serialize::json::{ToJson, Json};
 use rustc_serialize::hex::ToHex;
 use std::sync::Arc;
 use std::io::Read;
-use std::collections::{HashMap, VecDeque, BTreeMap};
+use std::collections::{HashMap, VecDeque, BTreeMap, HashSet};
 use std::fs::File;
+use std::fs;
 use std::os::unix::raw::{gid_t, uid_t, mode_t};
 use openssl::crypto::hash::{hash as hash_fn, Type};
 use log::{LogRecord, LogLevelFilter, LogMetadata};
@@ -455,8 +456,58 @@ impl ServerConfig {
         Ok(proto_def)
     }
 
-    pub fn read_from_file(config_file: &str) -> ServerConfig {
-        // parse config file
+    fn get_includes(config: &Yaml) -> VecDeque<String> {
+        config["include"].as_vec()
+            .map(|v|v.iter().filter_map(|s|s.as_str().map(|s|s.to_owned())).collect()).unwrap_or(VecDeque::new())
+    }
+
+    fn merge_dict(next: &BTreeMap<Yaml, Yaml>, base: &mut BTreeMap<Yaml, Yaml>, depth: u32) {
+        println!("Current merge depth: {}", depth);
+        // This is arbitrary choosen value
+        if depth > 10 {
+            panic!("Config file is too cumbersome! - reached maximum allowed merge depth");
+        }
+        for key in next.keys() {
+            println!("Key: {:?}", key);
+            if !base.contains_key(key) {
+                println!("Adding entry: {:?}", key);
+                base.insert(key.clone(), next.get(key).unwrap().clone());
+            } else {
+                match (base.get_mut(key), next.get(key)) {
+                    // if current entry is not in base add
+                    (Some(&mut Yaml::String(ref val)), _ ) if val == "include" => continue,
+                    (Some(&mut Yaml::Hash(ref mut base_value)), Some(&Yaml::Hash(ref next_value))) => {
+                        println!("Expanding entry: {:?}", key);
+                        Self::merge_dict(next_value, base_value, depth + 1);
+                    },
+                    (Some(&mut Yaml::Array(ref mut base_value)), Some(&Yaml::Array(ref next_value))) => {
+                        //this is easy, just extend array
+                        base_value.extend_from_slice(&next_value);
+                    },
+                    (Some(ref base_val), Some(ref next_val)) => {
+                        println!("Found 2 fields with different type ({:?}, {:?}), keeping previous", base_val, next_val);
+                    },
+                    _ => {panic!("IMPOSSIBLE");}
+                }
+            }
+        }
+
+    }
+
+    fn merge_files(file: &str, base: &mut BTreeMap<Yaml, Yaml>, pending: &mut VecDeque<String>) {
+        println!("Merge base with {}", file);
+        let config_yaml = Self::load_yaml(file).pop().unwrap(); // this should be convertable to hash
+        let mut includes = Self::get_includes(&config_yaml);
+        let config_yaml = config_yaml.as_hash().unwrap();
+        if !includes.is_empty() {
+            println!("Config from {} points to another references: {:?}", file, includes);
+            pending.append(&mut includes);
+        }
+        Self::merge_dict(config_yaml, base, 0);
+    }
+
+    fn load_yaml(config_file: &str) -> Vec<Yaml> {
+         // parse config file
         let mut f = match File::open(config_file) {
             Ok(file) => file,
             Err(e) => {
@@ -465,11 +516,34 @@ impl ServerConfig {
         };
         let mut s = String::new();
         f.read_to_string(&mut s).unwrap();
-        let config = YamlLoader::load_from_str(&s).unwrap();
-        let config_yaml = &config[0];
+        YamlLoader::load_from_str(&s).unwrap()
+    }
 
-        //let mut server_config = ServerConfig::new();
-        let backend = config_yaml["log"]["backend"].as_str().map_or("stdout".to_owned(), |s|s.to_lowercase());
+    pub fn read_from_file(config_file: &str) -> ServerConfig {
+        // parse config file
+        let mut config_yaml = BTreeMap::<Yaml, Yaml>::new();
+        let mut includes = VecDeque::new();
+        includes.push_back(config_file.to_owned());
+        let mut already_visited_files = HashSet::new();
+        while let Some(ref file) = includes.pop_front() {
+            // process includes
+            let file_path = match fs::canonicalize(file) {
+                Ok(path) => path,
+                Err(e) => {
+                    println!("Invalid file path {}: {}", file, e);
+                    continue;
+                }
+            };
+            if !already_visited_files.contains(&file_path) {
+                already_visited_files.insert(file_path);
+                Self::merge_files(&file, &mut config_yaml, &mut includes);
+            } else {
+                println!("Already visited: {:?} - Skip", &file_path);
+            }
+        }
+        let config_yaml = Yaml::Hash(config_yaml);
+        let backend = config_yaml["log"]["backend"]
+            .as_str().map_or("stdout".to_owned(), |s|s.to_lowercase());
         let path = config_yaml["log"]["path"].as_str();
         let log_level = config_yaml["log"]["level"].as_str().and_then(|s| {
             match &s.to_lowercase() as &str {
@@ -489,7 +563,7 @@ impl ServerConfig {
         set_log_level(log_level, &backend, path);
         info!("Using configuration from: {}", config_file);
 
-        let protocol_definition = Self::parse_protocol_definition(config_yaml).unwrap();
+        let protocol_definition = Self::parse_protocol_definition(&config_yaml).unwrap();
         let mut methods = HashMap::<String, MethodDefinition>::new();
         let mut streams = HashMap::<String, MethodDefinition>::new();
         info!("{:?}", config_yaml["limits"]);
