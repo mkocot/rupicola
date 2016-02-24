@@ -258,7 +258,6 @@ impl ParameterType {
     }
 }
 
-
 struct SimpleLogger;
 
 impl log::Log for SimpleLogger {
@@ -274,6 +273,7 @@ impl log::Log for SimpleLogger {
 }
 
 fn set_log_level(level: log::LogLevelFilter, backend: &str, path: Option<&str>) {
+    // create config async channel
     if let Err(e) = log::set_logger(|max_log_level| {
         max_log_level.set(level);
         if backend == "syslog" {
@@ -344,7 +344,7 @@ impl ServerConfig {
                 // This Is Silly! Unable to convert value to string... 
                 let file_mode = protocol_definition["mode"].as_i64().and_then(|mode| {
                     match u32::from_str_radix(&format!("{}", mode), 8) {
-                        Ok(m) if m <= 0o777 => Some(m),
+                        Ok(m) if m <= 0o777 => Some(m as mode_t),
                         Ok(_) => {
                             info!("Invalid mode: {}", mode);
                             None
@@ -382,29 +382,30 @@ impl ServerConfig {
     }
     pub fn parse_protocol_definition(config: &Yaml) -> Result<ProtocolDefinition, ()> {
         let protocol_definition = &config["protocol"];
-        let auth;
         let bind_points;
-        if config["protocol"].as_hash().is_some() {
-            info!("Parsing protocol definition");
-            // Get all bind points
-            let points = protocol_definition["bind"].as_vec().map(|v| {
-                let x: Vec<_> = v.iter().filter_map(|e| Self::parse_bind_point(e).ok() ).collect();
-                x
-            });
-            bind_points = match points {
-                None => {
-                    error!("Required field 'bind' is missing");
-                    return Err(());
-                },
-                Some(ref s) if s.is_empty() => {
-                    error!("Unable to parse at least one bind point!");
-                    return Err(());
-                },
-                Some(s) => s
-            };
-            
-            let basic_auth_config = &protocol_definition["auth-basic"];
-            auth = if !basic_auth_config.is_badvalue() {
+        if config["protocol"].as_hash().is_none() {
+            error!("No protocol field!");
+            return Err(());
+        }
+        info!("Parsing protocol definition");
+        // Get all bind points
+        let points = protocol_definition["bind"].as_vec().map(|v| {
+            let x: Vec<_> = v.iter().filter_map(|e| Self::parse_bind_point(e).ok() ).collect();
+            x
+        });
+        bind_points = match points {
+            None => {
+                error!("Required field 'bind' is missing");
+                return Err(());
+            },
+            Some(ref s) if s.is_empty() => {
+                error!("Unable to parse at least one bind point!");
+                return Err(());
+            },
+            Some(s) => s
+        };
+        fn parse_auth(basic_auth_config: &Yaml) -> Result<AuthMethod, ()> {
+            if !basic_auth_config.is_badvalue() {
                 let login = if let Some(s) = basic_auth_config["login"].as_str() {
                     s.to_owned()
                 } else {
@@ -432,18 +433,16 @@ impl ServerConfig {
                     }
                 };
 
-                AuthMethod::Basic {
+                Ok(AuthMethod::Basic {
                     login: login,
                     pass: pass
-                }
+                })
             } else {
                 warn!("Server is free4all. Consider using some kind of auth");
-                AuthMethod::None
+                Ok(AuthMethod::None)
             }
-        } else {
-            error!("No protocol field!");
-            return Err(());
         }
+        let auth = try!(parse_auth(&protocol_definition["auth-basic"]));
         // Parse limits
         let proto_def = ProtocolDefinition {
             bind: bind_points,
@@ -458,33 +457,30 @@ impl ServerConfig {
 
     fn get_includes(config: &Yaml) -> VecDeque<String> {
         config["include"].as_vec()
-            .map(|v|v.iter().filter_map(|s|s.as_str().map(|s|s.to_owned())).collect()).unwrap_or(VecDeque::new())
+            .map_or(VecDeque::new(), |v|v.iter().filter_map(|s|s.as_str().map(|s|s.to_owned())).collect())
     }
 
     fn merge_dict(next: &BTreeMap<Yaml, Yaml>, base: &mut BTreeMap<Yaml, Yaml>, depth: u32) {
-        println!("Current merge depth: {}", depth);
+        println!("Current config merge depth: {}", depth);
         // This is arbitrary choosen value
         if depth > 10 {
             panic!("Config file is too cumbersome! - reached maximum allowed merge depth");
         }
-        for key in next.keys() {
-            println!("Key: {:?}", key);
+        for (key, value) in next.iter() {
             if !base.contains_key(key) {
-                println!("Adding entry: {:?}", key);
-                base.insert(key.clone(), next.get(key).unwrap().clone());
+                base.insert(key.clone(), value.clone());
             } else {
-                match (base.get_mut(key), next.get(key)) {
+                match (base.get_mut(key), value) {
                     // if current entry is not in base add
                     (Some(&mut Yaml::String(ref val)), _ ) if val == "include" => continue,
-                    (Some(&mut Yaml::Hash(ref mut base_value)), Some(&Yaml::Hash(ref next_value))) => {
-                        println!("Expanding entry: {:?}", key);
+                    (Some(&mut Yaml::Hash(ref mut base_value)), &Yaml::Hash(ref next_value)) => {
                         Self::merge_dict(next_value, base_value, depth + 1);
                     },
-                    (Some(&mut Yaml::Array(ref mut base_value)), Some(&Yaml::Array(ref next_value))) => {
+                    (Some(&mut Yaml::Array(ref mut base_value)), &Yaml::Array(ref next_value)) => {
                         //this is easy, just extend array
                         base_value.extend_from_slice(&next_value);
                     },
-                    (Some(ref base_val), Some(ref next_val)) => {
+                    (Some(ref base_val), ref next_val) => {
                         println!("Found 2 fields with different type ({:?}, {:?}), keeping previous", base_val, next_val);
                     },
                     _ => {panic!("IMPOSSIBLE");}
@@ -495,8 +491,14 @@ impl ServerConfig {
     }
 
     fn merge_files(file: &str, base: &mut BTreeMap<Yaml, Yaml>, pending: &mut VecDeque<String>) {
-        println!("Merge base with {}", file);
-        let config_yaml = Self::load_yaml(file).pop().unwrap(); // this should be convertable to hash
+        println!("Merging config with {}", file);
+        let config_yaml = match Self::load_yaml(file).pop() {
+            Some(cfg) => cfg,
+            None => {
+                println!("Unable to read config file: {}", file);
+                return;
+            }
+        };
         let mut includes = Self::get_includes(&config_yaml);
         let config_yaml = config_yaml.as_hash().unwrap();
         if !includes.is_empty() {
@@ -560,9 +562,9 @@ impl ServerConfig {
             }}).unwrap_or(LogLevelFilter::Info);
 
         // set default sane log level (we should set it to max? or max only in debug)
+        // The problem is we are merging files before parsing config... 
         set_log_level(log_level, &backend, path);
         info!("Using configuration from: {}", config_file);
-
         let protocol_definition = Self::parse_protocol_definition(&config_yaml).unwrap();
         let mut methods = HashMap::<String, MethodDefinition>::new();
         let mut streams = HashMap::<String, MethodDefinition>::new();

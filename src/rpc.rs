@@ -39,18 +39,20 @@ impl MethodInvoke for MethodDefinition {
             }}
             .args(&arguments)
             .stdin(Stdio::null()) // Ignore stdin
-            .stderr(Stdio::null()) // Ignore stderr
+            .stderr(Stdio::piped()) // Capture stderr
             .stdout(Stdio::piped()); // Capture stdout
 
-        command.spawn().and_then(|child| {
+        command.spawn().and_then(|mut child| {
             // At most limit size
             let mut response_buffer = Vec::new();
-            let mut stdout = if let Some(stdout) = child.stdout {
+            let mut buffer_overrun = false;
+            // NOTE: This is wrapped inside {} to allow borrowed stdout go out of scope
+            {
+            let mut stdout = if let Some(ref mut stdout) = child.stdout {
                 stdout
             } else {
                 panic!("No stdout - this is likely a bug in server!");
             };
-            let mut buffer_overrun = false;
             let mut buffer = [0; 2048];
             loop {
                 let read = try!(stdout.read(&mut buffer[..]));
@@ -67,7 +69,8 @@ impl MethodInvoke for MethodDefinition {
                     let max_write_chunk = cmp::min(remaining_response_size, read);
                     if max_write_chunk == 0 {
                         error!("Exceed maximum response size! Skipping remaining data!");
-                        try!(copy(&mut stdout, &mut sink()));
+                        // TODO: Kill child?
+                        try!(copy(stdout, &mut sink()));
                         buffer_overrun = true;
                         break;
                     }
@@ -81,11 +84,12 @@ impl MethodInvoke for MethodDefinition {
                     response_buffer.extend_from_slice(&buffer[0..allowed_write_size]);
                 }
             }
-
+            }
+            let error_code = try!(child.wait());
             if buffer_overrun {
-                Ok(Err(response_buffer))
+                Ok(Err((response_buffer, error_code)))
             } else {
-                Ok(Ok(response_buffer))
+                Ok(Ok((response_buffer, error_code)))
             }
         }).map_err(|e| {
             error!("Failed to start command: {}", e);
@@ -93,7 +97,7 @@ impl MethodInvoke for MethodDefinition {
         }).and_then(|o| {
             // We could get there in 2 path: normal execution and clamped output execution
             let converted_output =  match o {
-                Err(ref o) | Ok(ref o) => {
+                Err((ref o, _)) | Ok((ref o, _)) => {
                     if self.response_encoding == ResponseEncoding::Utf8 {
                         String::from_utf8_lossy(&o).into_owned()
                     } else {
@@ -106,7 +110,18 @@ impl MethodInvoke for MethodDefinition {
                         ErrorCode::ServerError(-32003,
                                 "Subprocedure exceded maximum response size"),
                                 converted_output.to_json())),
-                Ok(_) => Ok(converted_output)
+                Ok((_, error)) if error.success() => Ok(converted_output),
+                Ok((_, error)) => {
+                    warn!("[{}] Exit with {}", self.name, error);
+
+                    let mut resp = HashMap::new();
+                    resp.insert("exit_code".to_owned(), error.code().unwrap_or(-1).to_json());
+                    resp.insert("result".to_owned(), converted_output.to_json());
+                    Err(ErrorJsonRpc::new_data(
+                            ErrorCode::ServerError(-32005,
+                                "Subprocedure returned error code"),
+                                resp.to_json()))
+                }
             }
         }).and_then(|o| {
             Ok(o.to_json())
