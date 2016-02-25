@@ -19,6 +19,7 @@ extern crate log;
 extern crate rustc_serialize;
 extern crate yaml_rust;
 extern crate syslog;
+extern crate libc;
 
 use config::*;
 use hyper::status::StatusCode;

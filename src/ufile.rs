@@ -4,7 +4,7 @@ use std::convert::AsRef;
 use std::io;
 use std::path::Path;
 use std::ffi::CString;
-use std::os::unix::raw::{gid_t, uid_t};
+use libc::{gid_t, uid_t};
 use std::os::unix::ffi::OsStrExt;
 
 /// Convert libc result to convinient rust Result

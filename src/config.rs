@@ -9,7 +9,7 @@ use std::io::Read;
 use std::collections::{HashMap, VecDeque, BTreeMap, HashSet};
 use std::fs::File;
 use std::fs;
-use std::os::unix::raw::{gid_t, uid_t, mode_t};
+use libc::{gid_t, uid_t, mode_t};
 use openssl::crypto::hash::{hash as hash_fn, Type};
 use log::{LogRecord, LogLevelFilter, LogMetadata};
 use yaml_rust::{YamlLoader, Yaml};
