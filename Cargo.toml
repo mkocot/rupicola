@@ -1,7 +1,7 @@
 [package]
-name = "server"
+name = "rupicola"
 version = "0.1.0"
-authors = ["Marcin <kociolek.farfocle@gmail.com>"]
+authors = ["Marcin Kocot <pointer@0xabadc0de.ovh>"]
 
 
 [dependencies]

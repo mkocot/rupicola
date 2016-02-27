@@ -1,3 +1,19 @@
+//    Configuration parsing for Rupicola.
+//    Copyright (C) 2016  Marcin Kocot
+//
+//    This program is free software: you can redistribute it and/or modify
+//    it under the terms of the GNU General Public License as published by
+//    the Free Software Foundation, either version 3 of the License, or
+//    (at your option) any later version.
+//
+//    This program is distributed in the hope that it will be useful,
+//    but WITHOUT ANY WARRANTY; without even the implied warranty of
+//    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//    GNU General Public License for more details.
+//
+//    You should have received a copy of the GNU General Public License
+//    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
 extern crate log;
 extern crate syslog;
 
@@ -9,12 +25,13 @@ use std::io::Read;
 use std::collections::{HashMap, VecDeque, BTreeMap, HashSet};
 use std::fs::File;
 use std::fs;
+use std::fmt;
 use libc::{gid_t, uid_t, mode_t};
 use openssl::crypto::hash::{hash as hash_fn, Type};
 use log::{LogRecord, LogLevelFilter, LogMetadata};
 use yaml_rust::{YamlLoader, Yaml};
 use syslog::Facility;
-use ufile;
+use misc;
 
 /// Stored password type
 pub enum PassType {
@@ -290,95 +307,107 @@ fn set_log_level(level: log::LogLevelFilter, backend: &str, path: Option<&str>) 
         println!("Log framework failed {}", e);
     }
 }
+enum ParseError {
+    MissingField(String),
+    InvalidValue(String),
+    Other
+}
+
+impl fmt::Display for ParseError {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        match *self {
+        ParseError::MissingField(ref field) => write!(f, "Missing required field '{}'", field),
+        ParseError::InvalidValue(ref value) => write!(f, "Invalid value '{}'", value),
+        ParseError::Other => write!(f, "Do'h"),
+       }
+    }
+}
 
 impl ServerConfig {
-    fn parse_bind_point(protocol_definition: &Yaml) -> Result<Protocol, ()> {
-        if let Some(protocol_type) = protocol_definition["type"].as_str() {
-            let address = if let Some(addr) = protocol_definition["address"].as_str() {
-                info!("Address: {}", addr);
-                addr.to_owned()
-            } else {
-                warn!("No bindpoint! Using 127.0.0.1");
-                "127.0.0.1".to_owned()
-            };
+    fn parse_common_fields(protocol_definition: &Yaml) -> (Option<String>, bool) {
+        (protocol_definition["address"].as_str().map(str::to_owned),
+         protocol_definition["allow_private"].as_bool().unwrap_or(false))
+    }
+    fn parse_http_protocol(protocol_definition: &Yaml) -> Result<Protocol, ParseError> {
+        let (address, allow_private) = Self::parse_common_fields(protocol_definition);
+        let address = address.unwrap_or("127.0.0.1".to_owned());
+        let port = protocol_definition["port"].as_i64().map(|p|p as u16).unwrap_or(0);
+        Ok(Protocol::Http {
+            address: address,
+            port: port,
+            allow_private: allow_private,
+        })
+    }
 
-            let port = if let Some(port) = protocol_definition["port"].as_i64() {
-                info!("Port: {}", port);
-                port as u16
-            } else {
-                // This is error only if protocol is != Unix
-                if protocol_type != "unix" {
-                    error!("No port defined!");
-                    return Err(());
-                }
-                // just return "random" value it will never be used anyway
-                0
-            };
+    fn parse_https_protocol(protocol_definition: &Yaml) -> Result<Protocol, ParseError> {
+        let (address, allow_private) = Self::parse_common_fields(protocol_definition);
+        let address = address.unwrap_or("127.0.0.1".to_owned());
+        let port = protocol_definition["port"].as_i64().map(|p|p as u16).unwrap_or(0);
+        let cert = try!(protocol_definition["cert"].as_str().map(str::to_owned).ok_or(ParseError::MissingField("cert".to_owned())));
+        let key = try!(protocol_definition["key"].as_str().map(str::to_owned).ok_or(ParseError::MissingField("key".to_owned())));
 
-            info!("Protocol type: {}", protocol_type);
-            let allow_private = protocol_definition["allow_private"].as_bool().unwrap_or(false);
-            let cert = protocol_definition["cert"].as_str().map(str::to_owned);
-            let key = protocol_definition["key"].as_str().map(str::to_owned);
-            if protocol_type == "https" && (cert.is_none() || key.is_none()) {
-                if cert.is_none() || key.is_none() {
-                    error!("Requested https but not provided private key and certificate!");
-                    return Err(());
-                } else {
-                    return Ok(Protocol::Https {
-                        address: address,
-                        port: port,
-                        key: key.unwrap(),
-                        cert: cert.unwrap(),
-                        allow_private: allow_private,
-                    });
+        Ok(Protocol::Https {
+            address: address,
+            port: port,
+            allow_private: allow_private,
+            key: key,
+            cert: cert,
+        })
+    }
+
+    fn parse_unix_protocl(protocol_definition: &Yaml) -> Result<Protocol, ParseError> {
+        let (address, allow_private) = Self::parse_common_fields(protocol_definition);
+        let address = try!(address.ok_or(ParseError::MissingField("address".to_owned())));
+        // This Is Silly! Unable to convert value to string... 
+        let file_mode = protocol_definition["mode"].as_i64().and_then(|mode| {
+            match u32::from_str_radix(&format!("{}", mode), 8) {
+                Ok(m) if m <= 0o777 => Some(m as mode_t),
+                Ok(_) => {
+                    info!("Invalid mode: {}", mode);
+                    None
                 }
-            } else if protocol_type == "http" {
-                return Ok(Protocol::Http {
-                    address: address,
-                    port: port,
-                    allow_private: allow_private,
-                });
-            } else if protocol_type == "unix" {
-                let uid = protocol_definition["uid"].as_i64().map(|g|g as uid_t);
-                let gid = protocol_definition["gid"].as_i64().map(|g|g as gid_t);
-                // This Is Silly! Unable to convert value to string... 
-                let file_mode = protocol_definition["mode"].as_i64().and_then(|mode| {
-                    match u32::from_str_radix(&format!("{}", mode), 8) {
-                        Ok(m) if m <= 0o777 => Some(m as mode_t),
-                        Ok(_) => {
-                            info!("Invalid mode: {}", mode);
-                            None
-                        }
-                        Err(e) => {
-                            info!("Conversion for mode failed: {}", e);
-                            None
-                        }
-                    }
-                }).unwrap_or_else(|| {
-                    info!("Using default mode for socket");
-                    0o666
-                });
-                let (file_owner_uid, file_owner_gid) = match (uid, gid) {
-                    (Some(uid), Some(gid)) => (uid, gid),
-                    (Some(uid), None) => (uid, ufile::getgid()),
-                    (None, Some(gid)) => (ufile::getuid(), gid),
-                    (None, None) => (ufile::getuid(), ufile::getgid()),
-                };
-                return Ok(Protocol::Unix {
-                    address: address,
-                    allow_private: allow_private,
-                    file_owner_uid: file_owner_uid,
-                    file_owner_gid: file_owner_gid,
-                    file_mode: file_mode,
-                });
-            } else {
-                error!("Invalid protocol type '{}'!", protocol_type);
-                return Err(());
+                Err(e) => {
+                    info!("Conversion for mode failed: {}", e);
+                    None
+                }
             }
-        } else {
-            error!("No protocol type! Using HTTP");
-            return Err(());
-        }
+        }).unwrap_or_else(|| {
+            info!("Using default mode for socket");
+            0o666
+        });
+
+        let uid = protocol_definition["uid"].as_i64().map(|g|g as uid_t);
+        let gid = protocol_definition["gid"].as_i64().map(|g|g as gid_t);
+        let (file_owner_uid, file_owner_gid) = match (uid, gid) {
+            (Some(uid), Some(gid)) => (uid, gid),
+            (Some(uid), None) => (uid, misc::getgid()),
+            (None, Some(gid)) => (misc::getuid(), gid),
+            (None, None) => (misc::getuid(), misc::getgid()),
+        };
+        Ok(Protocol::Unix {
+            address: address,
+            allow_private: allow_private,
+            file_owner_uid: file_owner_uid,
+            file_owner_gid: file_owner_gid,
+            file_mode: file_mode,
+        })
+    }
+
+    fn parse_bind_point(protocol_definition: &Yaml) -> Result<Protocol, ()> {
+        match protocol_definition["type"].as_str() {
+            Some("http") => Self::parse_http_protocol(protocol_definition),
+            Some("https") => Self::parse_https_protocol(protocol_definition),
+            Some("unix") => Self::parse_unix_protocl(protocol_definition),
+            Some(prot) => {
+                Err(ParseError::InvalidValue(format!("Invalid protocol name: {}", prot)))
+            }
+            None => {
+                Err(ParseError::MissingField("type".to_owned()))
+            }
+        }.map_err(|e| {
+            error!("Error during parsing bind point: {}", e);
+            ()
+        })
     }
     pub fn parse_protocol_definition(config: &Yaml) -> Result<ProtocolDefinition, ()> {
         let protocol_definition = &config["protocol"];

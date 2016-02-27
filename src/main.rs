@@ -1,3 +1,19 @@
+//    Main file for Rupicola.
+//    Copyright (C) 2016  Marcin Kocot
+//
+//    This program is free software: you can redistribute it and/or modify
+//    it under the terms of the GNU General Public License as published by
+//    the Free Software Foundation, either version 3 of the License, or
+//    (at your option) any later version.
+//
+//    This program is distributed in the hope that it will be useful,
+//    but WITHOUT ANY WARRANTY; without even the implied warranty of
+//    MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+//    GNU General Public License for more details.
+//
+//    You should have received a copy of the GNU General Public License
+//    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+
 #![feature(ip)]
 
 // Local files/dependencies
@@ -6,7 +22,7 @@ mod params;
 mod handlers;
 mod lazy_response;
 mod rpc;
-mod ufile;
+mod misc;
 
 // External dependencies
 extern crate openssl;
@@ -43,6 +59,8 @@ use lazy_response::LazyResponse;
 use rpc::{RpcHandler, get_invoke_arguments};
 use handlers::{HandlerError, ResponseHandler};
 
+
+// Handler for incoming request
 struct SenderHandler {
     /// RPC handler
     json_rpc: JsonRpcServer<RpcHandler>,
@@ -144,10 +162,6 @@ impl Handler for SenderHandler {
             }
         } else { false };
 
-        if is_loopback {
-            info!("Response from loopback is allowed");
-        }
-
         // Enable this check early for normal requests
         // TODO: This almos repeat what is below in response
         if !is_loopback && !is_authorized {
@@ -162,71 +176,74 @@ impl Handler for SenderHandler {
             *res.status_mut() = StatusCode::MethodNotAllowed;
         }
 
-        if let RequestUri::AbsolutePath(ref path) = req.uri.clone() {
-            // 1) Check payload size in header
-            // this is sufficient as hyper relies on that
-            if let Some(&hyper::header::ContentLength(size)) = req.headers.get::<hyper::header::ContentLength>() {
-                if size > self.config.default_limits.payload_size.into() {
-                    error!("Request is too big! ({} > {})",
-                            size, self.config.default_limits.payload_size);
-                }
-            } else {
-                error!("Required header: ContentLength is missing!");
+        let path = if let RequestUri::AbsolutePath(ref path) = req.uri {
+            path.to_owned()
+        } else {
+            warn!("Invalid path in request");
+            return;
+        };
+
+        // 1. Check payload size in header
+        // this is sufficient as hyper relies on that
+        if let Some(&hyper::header::ContentLength(size)) = req.headers.get::<hyper::header::ContentLength>() {
+            if size > self.config.default_limits.payload_size.into() {
+                error!("Request is too big! ({} > {})",
+                        size, self.config.default_limits.payload_size);
+                return;
             }
+        } else {
+            error!("Required header: ContentLength is missing!");
+            return;
+        }
 
-            let mut request_str = String::new();
-            let req_result = req.read_to_string(&mut request_str);
+        let mut request_str = String::new();
+        let req_result = req.read_to_string(&mut request_str);
 
-            info!("Processing request: {}", request_str);
-            let path = path as &str;
-            let mut lazy = LazyResponse::new(res);
-            let response = if let Err(e) = req_result {
-                error!("Unable to obtain request data: {}", e);
-                Err(HandlerError::InvalidRequest)
-            } else {
-                if self.config.protocol_definition.stream_path == path {
-                    self.handle_response(&request_str, is_authorized, &mut lazy)
-                } else if self.config.protocol_definition.rpc_path == path {
-                    lazy.enable_buffer();
-                    self.json_rpc.handle_response(&request_str, is_authorized, &mut lazy)
-                } else {
-                    error!("Unknown request path: {}", path);
-                    Err(HandlerError::NoSuchMethod)
-                }
-            };
+        info!("Processing request: {}", request_str);
+        let mut lazy = LazyResponse::new(res);
+        let response = if let Err(e) = req_result {
+            error!("Unable to obtain request data: {}", e);
+            Err(HandlerError::InvalidRequest)
+        } else if self.config.protocol_definition.stream_path == path {
+            self.handle_response(&request_str, is_authorized, &mut lazy)
+        } else if self.config.protocol_definition.rpc_path == path {
+            lazy.enable_buffer();
+            self.json_rpc.handle_response(&request_str, is_authorized, &mut lazy)
+        } else {
+            error!("Unknown request path: {}", path);
+            Err(HandlerError::NoSuchMethod)
+        };
 
-            if let Err(err) = response {
-                // Ok Some errors during processing
-                match lazy {
-                    LazyResponse::Fresh(ref mut resp, _) => {
-                        //Set response code etc
-                        *resp.status_mut() = match err {
-                            HandlerError::NoSuchMethod => StatusCode::NotFound,
-                            HandlerError::InvalidRequest => StatusCode::BadRequest,
-                            HandlerError::Unauthorized => StatusCode::Unauthorized
-                        };
+        if let Err(err) = response {
+            // Ok Some errors during processing
+            match lazy {
+                LazyResponse::Fresh(ref mut resp, _) => {
+                    //Set response code etc
+                    *resp.status_mut() = match err {
+                        HandlerError::NoSuchMethod => StatusCode::NotFound,
+                        HandlerError::InvalidRequest => StatusCode::BadRequest,
+                        HandlerError::Unauthorized => StatusCode::Unauthorized
+                    };
 
-                        if !is_authorized || resp.status() == StatusCode::Unauthorized {
-                            resp.headers_mut().set_raw("WWW-Authenticate",
-                                                       vec![b"Basic".to_vec()]);
-                            *resp.status_mut() = StatusCode::Unauthorized;
-                        }
-                    }
-                    LazyResponse::Streaming(_) => {
-                        warn!("Lazy response should be in FRESH state!");
-                    }
-                    LazyResponse::NONE => {
-                        error!("Ok somehow somehing is broken hard");
-                        unreachable!();
+                    if !is_authorized || resp.status() == StatusCode::Unauthorized {
+                        resp.headers_mut().set_raw("WWW-Authenticate",
+                                                   vec![b"Basic".to_vec()]);
+                        *resp.status_mut() = StatusCode::Unauthorized;
                     }
                 }
-            }
-
-            if let Err(ref e) = lazy.end() {
-                warn!("Closing lazy writer failed: {}", e);
+                LazyResponse::Streaming(_) => {
+                    warn!("Lazy response should be in FRESH state!");
+                }
+                LazyResponse::NONE => {
+                    error!("Ok somehow something is broken hard");
+                    unreachable!();
+                }
             }
         }
-    
+
+        if let Err(ref e) = lazy.end() {
+            warn!("Closing lazy writer failed: {}", e);
+        }
     }
 }
 
@@ -401,7 +418,7 @@ impl Protocol {
                             }
 
                             // file uid gid
-                            if let Err(e) = ufile::chown(&address, file_owner_uid, file_owner_gid) {
+                            if let Err(e) = misc::chown(&address, file_owner_uid, file_owner_gid) {
                                 error!("Unable to set socket owner: {}", e);
                                 let _ = l.close();
                             }
@@ -437,7 +454,12 @@ fn main() {
     };
 
     if matches.opt_present("h") {
-        let brief = format!("Simple RPC daemon with streaming.\nUsage: {} [options]", program);
+        let brief = format!("Rupicola  Copyright (C) 2016  Marcin Kocot
+This program comes with ABSOLUTELY NO WARRANTY.
+This is free software, and you are welcome to redistribute it
+under certain conditions
+
+Usage: {} [options]", program);
         print!("{}", opts.usage(&brief));
         return;
     }
