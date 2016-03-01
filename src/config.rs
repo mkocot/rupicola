@@ -307,10 +307,19 @@ fn set_log_level(level: log::LogLevelFilter, backend: &str, path: Option<&str>) 
         println!("Log framework failed {}", e);
     }
 }
-enum ParseError {
+
+pub enum ParseError {
     MissingField(String),
     InvalidValue(String),
-    Other
+}
+
+impl ParseError {
+    pub fn no_field(name: &str) -> ParseError {
+        ParseError::MissingField(name.to_owned())
+    }
+    pub fn bad_value<T: AsRef<str>>(value: T) -> ParseError {
+        ParseError::InvalidValue(value.as_ref().to_owned())
+    }
 }
 
 impl fmt::Display for ParseError {
@@ -318,7 +327,6 @@ impl fmt::Display for ParseError {
         match *self {
         ParseError::MissingField(ref field) => write!(f, "Missing required field '{}'", field),
         ParseError::InvalidValue(ref value) => write!(f, "Invalid value '{}'", value),
-        ParseError::Other => write!(f, "Do'h"),
        }
     }
 }
@@ -330,8 +338,8 @@ impl ServerConfig {
     }
     fn parse_http_protocol(protocol_definition: &Yaml) -> Result<Protocol, ParseError> {
         let (address, allow_private) = Self::parse_common_fields(protocol_definition);
-        let address = address.unwrap_or("127.0.0.1".to_owned());
-        let port = protocol_definition["port"].as_i64().map(|p|p as u16).unwrap_or(0);
+        let address = try!(address.ok_or(ParseError::no_field("address")));
+        let port = try!(protocol_definition["port"].as_i64().map(|p|p as u16).ok_or(ParseError::no_field("port")));
         Ok(Protocol::Http {
             address: address,
             port: port,
@@ -341,10 +349,10 @@ impl ServerConfig {
 
     fn parse_https_protocol(protocol_definition: &Yaml) -> Result<Protocol, ParseError> {
         let (address, allow_private) = Self::parse_common_fields(protocol_definition);
-        let address = address.unwrap_or("127.0.0.1".to_owned());
-        let port = protocol_definition["port"].as_i64().map(|p|p as u16).unwrap_or(0);
-        let cert = try!(protocol_definition["cert"].as_str().map(str::to_owned).ok_or(ParseError::MissingField("cert".to_owned())));
-        let key = try!(protocol_definition["key"].as_str().map(str::to_owned).ok_or(ParseError::MissingField("key".to_owned())));
+        let address = try!(address.ok_or(ParseError::no_field("address")));
+        let port = try!(protocol_definition["port"].as_i64().map(|p|p as u16).ok_or(ParseError::no_field("port")));
+        let cert = try!(protocol_definition["cert"].as_str().map(str::to_owned).ok_or(ParseError::no_field("cert")));
+        let key = try!(protocol_definition["key"].as_str().map(str::to_owned).ok_or(ParseError::no_field("key")));
 
         Ok(Protocol::Https {
             address: address,
@@ -357,7 +365,7 @@ impl ServerConfig {
 
     fn parse_unix_protocl(protocol_definition: &Yaml) -> Result<Protocol, ParseError> {
         let (address, allow_private) = Self::parse_common_fields(protocol_definition);
-        let address = try!(address.ok_or(ParseError::MissingField("address".to_owned())));
+        let address = try!(address.ok_or(ParseError::no_field("address")));
         // This Is Silly! Unable to convert value to string... 
         let file_mode = protocol_definition["mode"].as_i64().and_then(|mode| {
             match u32::from_str_radix(&format!("{}", mode), 8) {
@@ -393,53 +401,50 @@ impl ServerConfig {
         })
     }
 
-    fn parse_bind_point(protocol_definition: &Yaml) -> Result<Protocol, ()> {
+    fn parse_bind_point(protocol_definition: &Yaml) -> Result<Protocol, ParseError> {
         match protocol_definition["type"].as_str() {
             Some("http") => Self::parse_http_protocol(protocol_definition),
             Some("https") => Self::parse_https_protocol(protocol_definition),
             Some("unix") => Self::parse_unix_protocl(protocol_definition),
             Some(prot) => {
-                Err(ParseError::InvalidValue(format!("Invalid protocol name: {}", prot)))
+                Err(ParseError::bad_value(format!("Invalid protocol name: {}", prot)))
             }
             None => {
-                Err(ParseError::MissingField("type".to_owned()))
+                Err(ParseError::no_field("type"))
             }
-        }.map_err(|e| {
-            error!("Error during parsing bind point: {}", e);
-            ()
-        })
+        }
     }
-    pub fn parse_protocol_definition(config: &Yaml) -> Result<ProtocolDefinition, ()> {
+    pub fn parse_protocol_definition(config: &Yaml) -> Result<ProtocolDefinition, ParseError> {
         let protocol_definition = &config["protocol"];
         let bind_points;
         if config["protocol"].as_hash().is_none() {
-            error!("No protocol field!");
-            return Err(());
+            return Err(ParseError::no_field("protocol"));
         }
         info!("Parsing protocol definition");
         // Get all bind points
         let points = protocol_definition["bind"].as_vec().map(|v| {
-            let x: Vec<_> = v.iter().filter_map(|e| Self::parse_bind_point(e).ok() ).collect();
+            let x: Vec<_> = v.iter().filter_map(|e| Self::parse_bind_point(e).map_err(|e| {
+                error!("Unable to parse bind point: {}", e);
+                e}).ok() ).collect();
             x
         });
         bind_points = match points {
             None => {
-                error!("Required field 'bind' is missing");
-                return Err(());
+                return Err(ParseError::no_field("bind"));
             },
             Some(ref s) if s.is_empty() => {
                 error!("Unable to parse at least one bind point!");
-                return Err(());
+                return Err(ParseError::bad_value("bind"));
             },
             Some(s) => s
         };
-        fn parse_auth(basic_auth_config: &Yaml) -> Result<AuthMethod, ()> {
+        fn parse_auth(basic_auth_config: &Yaml) -> Result<AuthMethod, ParseError> {
             if !basic_auth_config.is_badvalue() {
                 let login = if let Some(s) = basic_auth_config["login"].as_str() {
                     s.to_owned()
                 } else {
                     warn!("basic-auth: Invalid or absent login field");
-                    return Err(());
+                    return Err(ParseError::no_field("login"));
                 };
 
                 //Digest: None, Md5, Sha1, moar in future
@@ -448,7 +453,7 @@ impl ServerConfig {
                     s.to_owned()
                 } else {
                     warn!("basic-auth: No required hash field");
-                    return Err(());
+                    return Err(ParseError::no_field("hash"));
                 };
 
                 //type conversion bug again
@@ -456,9 +461,9 @@ impl ServerConfig {
                     "none" => PassType::Plain(pass_hash),
                     "sha1" => PassType::Sha1(pass_hash),
                     "md5" => PassType::Md5(pass_hash),
-                    _ => {
+                    value => {
                         warn!("basic-auth: Invalid digest!");
-                        return Err(());
+                        return Err(ParseError::bad_value(format!("Invalid digest type: {}", value)));
                     }
                 };
 
@@ -550,7 +555,7 @@ impl ServerConfig {
         YamlLoader::load_from_str(&s).unwrap()
     }
 
-    pub fn read_from_file(config_file: &str) -> ServerConfig {
+    pub fn read_from_file(config_file: &str) -> Result<ServerConfig, ParseError> {
         // parse config file
         let mut config_yaml = BTreeMap::<Yaml, Yaml>::new();
         let mut includes = VecDeque::new();
@@ -594,7 +599,7 @@ impl ServerConfig {
         // The problem is we are merging files before parsing config... 
         set_log_level(log_level, &backend, path);
         info!("Using configuration from: {}", config_file);
-        let protocol_definition = Self::parse_protocol_definition(&config_yaml).unwrap();
+        let protocol_definition = try!(Self::parse_protocol_definition(&config_yaml));
         let mut methods = HashMap::<String, MethodDefinition>::new();
         let mut streams = HashMap::<String, MethodDefinition>::new();
         info!("{:?}", config_yaml["limits"]);
@@ -604,13 +609,13 @@ impl ServerConfig {
             parse_methods(methods_node, &mut methods, &mut streams, &default_limits);
         }
 
-        ServerConfig {
+        Ok(ServerConfig {
             protocol_definition: protocol_definition,
             log_level: log_level,
             methods: methods,
             streams: streams,
             default_limits: default_limits
-        }
+        })
     }
 }
 
@@ -775,7 +780,7 @@ fn parse_method(method_name: &Yaml, method_def: &Yaml, default_limits: &Arc<Limi
         let path = if let Some(path) = invoke["exec"].as_str() {
             path
         } else {
-            return Err(format!("Required parameter missin: path. Skip definition for {}", name));
+            return Err(format!("Required parameter missing: path. Skip definition for {}", name));
         };
         let delay = invoke["delay"]
                         .as_i64()
@@ -833,7 +838,7 @@ fn parse_method(method_name: &Yaml, method_def: &Yaml, default_limits: &Arc<Limi
         } else if !params.is_badvalue() {
                 error!("[{}] Invalid value for field: 'param'", name);
         }
-        let mut variables = Vec::<MethodParam>::new();
+        let mut variables = Vec::new();
 
         if let Some(exec_params) = invoke["args"].as_vec() {
             for exec_param in exec_params {

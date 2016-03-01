@@ -469,10 +469,17 @@ Usage: {} [options]", program);
         return;
     }
 
-    let config_file = matches.opt_str("c").unwrap_or("/etc/jsonrpcd/jsonrpcd.conf".to_owned());
+    let config_file = matches.opt_str("c").unwrap_or("/etc/rupicola/rupicola.conf".to_owned());
 
     info!("Starting parsing configuration");
-    let config = Arc::new(ServerConfig::read_from_file(&config_file));
+    let config = match ServerConfig::read_from_file(&config_file) {
+        Ok(config) => Arc::new(config),
+        Err(e) => {
+            error!("Unable to parse config file: {}", e);
+            error!("Exiting");
+            panic!();
+        }
+    };
 
     // Barrier will wait for 2 signals before proceeding further
     // this mean 1 signal is always from main thread, and second one only
