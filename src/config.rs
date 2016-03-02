@@ -850,7 +850,7 @@ fn parse_method(method_name: &Yaml, method_def: &Yaml, default_limits: &Arc<Limi
             }
         }
         // For now only string...
-        let fake_response = method_def["response"].as_str().map(|json|json.to_json());
+        let fake_response = method_def["output"]["response"].as_str().map(|json|json.to_json());
 
         let is_private = method_def["private"].as_bool().unwrap_or(false);
         //This is a bug? Sometimes rustc cant handle &String to &str conversion
@@ -881,7 +881,7 @@ fn parse_method(method_name: &Yaml, method_def: &Yaml, default_limits: &Arc<Limi
         } else {
             default_limits.clone()
         };
-        let run_as_node = &method_def["run-as"];
+        let run_as_node = &invoke["run-as"];
         let run_as = if run_as_node.as_hash().is_some() {
             let gid = if let Some(gid) = run_as_node["gid"].as_i64() {
                 gid as gid_t
