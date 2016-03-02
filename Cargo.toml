@@ -16,7 +16,7 @@ hyperlocal = "^0.1"
 libc = "^0.2"
 
 [dependencies.jsonrpc]
-git = "https://bitbucket.org/kociolek/jsonrpc.git"
+git = "https://github.com/mkocot/jsonrpc"
 
 [dependencies.syslog]
 git = "https://bitbucket.org/kociolek/rust-syslog.git"
