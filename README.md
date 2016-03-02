@@ -103,6 +103,7 @@ uri:
     rpc: /path
 ```
 Both fields are optional and require string field type. Note that path must be prefixed with trailing '/'.
+
 | Parameter | Default   |
 | --------- | --------- |
 | streamed  | /streamed |
