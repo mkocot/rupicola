@@ -43,7 +43,7 @@ First ever appearance of method or any other definition is used and it redefinit
 Default action for missing included file is warning (non fatal). For now maximum depth is hardcoded to 10.
 
 ### protocol
-Section used to configure bind points, auth mode and change default path to streaming and rpc subsystems
+Section used to configure bind points, auth mode and change default path to streaming and RPC subsystems.
 
 #### bind
 Define listening bindpoint. This object have following fields:
@@ -51,7 +51,7 @@ Define listening bindpoint. This object have following fields:
 
 *allow_private* is special flag which indicate if request from loopback is handled without checking credentials. This flag can be used on any bind point type. Default value is false.
 
-Note that any field that is not highlighted is ignored during parsing config.
+Note that any field that is not highlighted is ignored during parsing configuration.
 For defining http listening endpoint use:
 ```yaml
 type: http
@@ -82,21 +82,21 @@ To enforce checking auth you can specify login and password. Server use simple h
 ```yaml
 login: any-string
 ```
-Password field come with two falavours: plaintext or hashed
+Password field come with two flavours: plain text or hashed
 ```
 Plaintext: (discouraged)
 password: any string
 ```
-Hashed version of password use MD5 or SHA-1 as base hasing algorithm:
+Hashed version of password use MD5 or SHA-1 as base hashing algorithm:
 ```
 passowrd: {hash: hashvalue, digest: MD5}
 password: {hash: hashvalue, digest: SHA1}
 ```
 
-This is recommended method of storing passsowrd.
+This is recommended method of storing password.
 
 #### uri
-To change default uri path for stramed and rpc define
+To change default uri path for streamed and RPC define
 ```yaml
 uri:
     streamed: /path
@@ -161,11 +161,11 @@ method-name:
     limits: (default: nil)
         - fields from limits (same as global level, default: from global)
 ```
-All methods are defined as object with keys that reflect names. All names shoult be string value. All methods by default are public which means they are accessible from loopback and external addresses. To force only local access specify flag 'private' to true. Method can work only as streamed or RPC. This aspect is controlled by settings field 'streamed' to either true or false.
+All methods are defined as object with keys that reflect names. All names should be string value. All methods by default are public which means they are accessible from loopback and external addresses. To force only local access specify flag 'private' to true. Method can work only as streamed or RPC. This aspect is controlled by settings field 'streamed' to either true or false.
 
-For special function it's also possible to encode raw byte output from invoked application as base64. This is controlled by field 'encoding'. Default all stdout is converted to utf-8.
+For special function it's also possible to encode raw byte output from invoked application as Base64. This is controlled by field 'encoding'. Default all stdout is converted to UTF-8.
 
-All methods can require parameters. Only supported method of prividing them is by-name. All parameters should have valid string name and specified type. If parameter is flagged as optional (ptional: true) then all arguments using this parameters are ignored in invocation.
+All methods can require parameters. Only supported method of providing them is by-name. All parameters should have valid string name and specified type. If parameter is flagged as optional (optional: true) then all arguments using this parameters are ignored in invocation.
 
 To specify application to run it's required to set exec field to correct path.
 
