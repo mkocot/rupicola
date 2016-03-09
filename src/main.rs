@@ -14,8 +14,6 @@
 //    You should have received a copy of the GNU General Public License
 //    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-#![feature(ip)]
-
 // Local files/dependencies
 mod config;
 mod params;
@@ -155,8 +153,7 @@ impl Handler for SenderHandler {
             match req.remote_addr {
                 std::net::SocketAddr::V4(addr) => {
                     // Special case: 0.0.0.0:0 -> Unix domain socket
-                    // Check for 0.0.0.0 is done by 'is_unspecified'
-                    addr.port() == 0 && addr.ip().is_unspecified() || addr.ip().is_loopback()
+                    addr.port() == 0 && addr.ip().octets() == [0, 0, 0, 0] || addr.ip().is_loopback()
                 },
                 std::net::SocketAddr::V6(addr) => addr.ip().is_loopback(),
             }
