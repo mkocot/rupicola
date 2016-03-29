@@ -82,18 +82,32 @@ To enforce checking auth you can specify login and password. Server use simple h
 ```yaml
 login: any-string
 ```
-Password field come with two flavours: plain text or hashed
-```
-Plaintext: (discouraged)
-password: any string
-```
-Hashed version of password use MD5 or SHA-1 as base hashing algorithm:
-```
-passowrd: {hash: hashvalue, digest: MD5}
-password: {hash: hashvalue, digest: SHA1}
+Password field is string
+
+Hashed version of password use following modes:
+
+- Standard BSD hash
+- Enhanced DES-based hash
+- MD5 crypt
+- HMAC-SHA1 hash
+- SHA-256 based
+- SHA-512 based
+- standard unix crypt
+
+To generate MD5 based hash or standard unix use for example openssl passwd.
+
+```yaml
+passowrd: $1$sRN7MKRJ$XfbAXBpoOphTIhBRZuPAl.
+password: ktsudxoI79bPk
 ```
 
 This is recommended method of storing password.
+
+To disable crypt and force plaintext password check set field is_plaintext to true
+
+```yaml
+is_plaintext: true
+```
 
 #### uri
 To change default uri path for streamed and RPC define
