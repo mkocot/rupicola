@@ -14,6 +14,7 @@ clippy = {version = "*", optional = true}
 openssl = "^0.7"
 hyperlocal = "^0.1"
 libc = "^0.2"
+pwhash = "^0.1"
 
 [dependencies.jsonrpc]
 git = "https://github.com/mkocot/jsonrpc"
