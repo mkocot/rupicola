@@ -14,8 +14,6 @@
 //    You should have received a copy of the GNU General Public License
 //    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-#![feature(ip)]
-
 // Local files/dependencies
 mod config;
 mod params;
@@ -25,6 +23,7 @@ mod rpc;
 mod misc;
 
 // External dependencies
+extern crate pwhash;
 extern crate openssl;
 extern crate getopts;
 extern crate hyper;
@@ -155,8 +154,7 @@ impl Handler for SenderHandler {
             match req.remote_addr {
                 std::net::SocketAddr::V4(addr) => {
                     // Special case: 0.0.0.0:0 -> Unix domain socket
-                    // Check for 0.0.0.0 is done by 'is_unspecified'
-                    addr.port() == 0 && addr.ip().is_unspecified() || addr.ip().is_loopback()
+                    addr.port() == 0 && addr.ip().octets() == [0, 0, 0, 0] || addr.ip().is_loopback()
                 },
                 std::net::SocketAddr::V6(addr) => addr.ip().is_loopback(),
             }
@@ -260,27 +258,26 @@ impl SenderHandler {
     }
 
     fn is_request_authorized(&self, req: &Request) -> bool {
-        match self.config.protocol_definition.auth {
-            AuthMethod::Basic { ref login, ref pass } => {
-                info!("Using basic auth");
-                // check if user provided required credentials
-                let auth_heder = req.headers.get::<Authorization<Basic>>();
-                if let Some(ref auth) = auth_heder {
-                    // ok.. remove owned string
-                    let password = auth.password.clone().unwrap_or("".to_owned());
-                    if auth.username != *login || !pass.validate(&password) {
-                        warn!("Invalid username or password");
-                        false
-                    } else {
+        let auth_heder = req.headers.get::<Authorization<Basic>>();
+        if let Some(ref auth) = auth_heder {
+            let password = auth.password.clone().unwrap_or("".to_owned());
+            match self.config.protocol_definition.auth.verify(&auth.username, &password) {
+                true => {
                         info!("Access granted");
-                        true
-                    }
-                } else {
-                    error!("Required basic auth and got none!");
-                    false
+                        return true;
+                },
+                false => {
+                        warn!("Invalid username or password");
+                        return false;
                 }
             }
-            AuthMethod::None => true,
+        } else if self.config.protocol_definition.auth.required() {
+            // No auth provided but required
+            error!("Required basic auth and got none!");
+            return false;
+        } else {
+            // No auth provided and no required
+            true
         }
     }
 
