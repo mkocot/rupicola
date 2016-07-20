@@ -6,13 +6,13 @@ authors = ["Marcin Kocot <mkocot@k.pl>>"]
 
 [dependencies]
 getopts = "^0.2"
-hyper = "^0.7"
+hyper = "^0.9"
 rustc-serialize = "^0.3"
 log = "^0.3"
 yaml-rust = "^0.3"
 clippy = {version = "*", optional = true}
 openssl = "^0.7"
-hyperlocal = "^0.1"
+hyperlocal = "^0.2"
 libc = "^0.2"
 pwhash = "^0.1"
 
@@ -21,7 +21,13 @@ git = "https://github.com/mkocot/jsonrpc"
 
 [dependencies.syslog]
 git = "https://bitbucket.org/kociolek/rust-syslog.git"
+default-features = false
 
 [features]
 default = []
+nightly = []
 dev = ["clippy"]
+
+[profile.release]
+lto = true
+#panic = "abort"

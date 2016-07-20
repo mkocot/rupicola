@@ -13,6 +13,9 @@
 //
 //    You should have received a copy of the GNU General Public License
 //    along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#[cfg_attr(nightly, feature(alloc_system))]
+#[cfg(nightly)]
+extern crate alloc_system;
 
 // Local files/dependencies
 mod config;
@@ -57,6 +60,8 @@ use std::time::Duration;
 use lazy_response::LazyResponse;
 use rpc::{RpcHandler, get_invoke_arguments};
 use handlers::{HandlerError, ResponseHandler};
+
+use libc::mode_t;
 
 
 // Handler for incoming request
@@ -407,7 +412,7 @@ impl Protocol {
                             // Ok now correct permissions for socket
                             if let Err(e) = std::fs::metadata(&address).and_then(|p| {
                                 let mut p = p.permissions();
-                                p.set_mode(file_mode);
+                                p.set_mode(file_mode as mode_t);
                                 std::fs::set_permissions(&address, p)
                             }) {
                                 error!("Unable to set permission for {}: {}", &address, e);
