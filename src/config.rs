@@ -21,6 +21,7 @@ use params::MethodParam;
 use rustc_serialize::json::{ToJson, Json};
 use std::sync::Arc;
 use std::io::Read;
+use std::io;
 use std::collections::{HashMap, VecDeque, BTreeMap, HashSet};
 use std::fs::File;
 use std::fs;
@@ -479,48 +480,56 @@ impl ServerConfig {
         Ok(proto_def)
     }
 
-    fn get_includes(config: &Yaml) -> VecDeque<String> {
+    fn get_includes(config: &Yaml) -> VecDeque<(String, bool)> {
         config["include"].as_vec()
-            .map_or(VecDeque::new(), |v|v.iter().filter_map(|s|s.as_str().map(|s|s.to_owned())).collect())
+            .map_or(VecDeque::new(), |v| v.iter().filter_map(|v| {
+                match (v.as_str(), v.as_hash().and_then(|s|s.iter().next().map(|(a,b)|(a.as_str().map(|a|a.to_owned()), b.as_bool().unwrap_or(false))))) {
+                    (Some(s), None) => Some((s.to_owned(), false)),
+                    (None, Some((Some(path), required))) => Some((path, required)),
+                    _ => None,
+                }
+            }).collect())
     }
 
-    fn merge_dict(next: &BTreeMap<Yaml, Yaml>, base: &mut BTreeMap<Yaml, Yaml>, depth: u32) {
+    fn merge_dict(next: &BTreeMap<Yaml, Yaml>, base: &mut BTreeMap<Yaml, Yaml>, depth: u32) -> io::Result<()> {
         println!("Current config merge depth: {}", depth);
         // This is arbitrary choosen value
         if depth > 10 {
-            panic!("Config file is too cumbersome! - reached maximum allowed merge depth");
-        }
-        for (key, value) in next.iter() {
-            if !base.contains_key(key) {
-                base.insert(key.clone(), value.clone());
-            } else {
-                match (base.get_mut(key), value) {
-                    // if current entry is not in base add
-                    (Some(&mut Yaml::String(ref val)), _ ) if val == "include" => continue,
-                    (Some(&mut Yaml::Hash(ref mut base_value)), &Yaml::Hash(ref next_value)) => {
-                        Self::merge_dict(next_value, base_value, depth + 1);
-                    },
-                    (Some(&mut Yaml::Array(ref mut base_value)), &Yaml::Array(ref next_value)) => {
-                        //this is easy, just extend array
-                        base_value.extend_from_slice(&next_value);
-                    },
-                    (Some(ref base_val), ref next_val) => {
-                        println!("Found 2 fields with different type ({:?}, {:?}), keeping previous", base_val, next_val);
-                    },
-                    _ => {panic!("IMPOSSIBLE");}
+            Err(io::Error::new(io::ErrorKind::Other, "Config file is too cumbersome! - reached maximum allowed merge depth"))
+        } else {
+            for (key, value) in next.iter() {
+                if !base.contains_key(key) {
+                    base.insert(key.clone(), value.clone());
+                } else {
+                    match (base.get_mut(key), value) {
+                        // if current entry is not in base add
+                        (Some(&mut Yaml::String(ref val)), _ ) if val == "include" => continue,
+                        (Some(&mut Yaml::Hash(ref mut base_value)), &Yaml::Hash(ref next_value)) => {
+                            if let e @ Err(_) = Self::merge_dict(next_value, base_value, depth + 1) {
+                                return e;
+                            }
+                        },
+                        (Some(&mut Yaml::Array(ref mut base_value)), &Yaml::Array(ref next_value)) => {
+                            //this is easy, just extend array
+                            base_value.extend_from_slice(&next_value);
+                        },
+                        (Some(ref base_val), ref next_val) => {
+                            println!("Found 2 fields with different type ({:?}, {:?}), keeping previous", base_val, next_val);
+                        },
+                        _ => {panic!("IMPOSSIBLE");}
+                    }
                 }
             }
+            Ok(())
         }
-
     }
 
-    fn merge_files(file: &str, base: &mut BTreeMap<Yaml, Yaml>, pending: &mut VecDeque<String>) {
+    fn merge_files(file: &str, base: &mut BTreeMap<Yaml, Yaml>, pending: &mut VecDeque<(String, bool)>) -> io::Result<()> {
         println!("Merging config with {}", file);
-        let config_yaml = match Self::load_yaml(file).pop() {
-            Some(cfg) => cfg,
-            None => {
-                println!("Unable to read config file: {}", file);
-                return;
+        let config_yaml = match Self::load_yaml(file).and_then(|mut cfg| cfg.pop().ok_or(io::Error::new(io::ErrorKind::Other, "Empty document"))) {
+            Ok(cfg) => cfg,
+            Err(e) => {
+                return Err(e);
             }
         };
         let mut includes = Self::get_includes(&config_yaml);
@@ -529,40 +538,47 @@ impl ServerConfig {
             println!("Config from {} points to another references: {:?}", file, includes);
             pending.append(&mut includes);
         }
-        Self::merge_dict(config_yaml, base, 0);
+        Self::merge_dict(config_yaml, base, 0)
     }
 
-    fn load_yaml(config_file: &str) -> Vec<Yaml> {
+    fn load_yaml(config_file: &str) -> io::Result<Vec<Yaml>> {
          // parse config file
-        let mut f = match File::open(config_file) {
-            Ok(file) => file,
-            Err(e) => {
-                panic!("Unable to read config file {}. Error: {}", config_file, e);
-            }
-        };
+        let mut f = try!(File::open(config_file));
         let mut s = String::new();
-        f.read_to_string(&mut s).unwrap();
-        YamlLoader::load_from_str(&s).unwrap()
+        try!(f.read_to_string(&mut s));
+        YamlLoader::load_from_str(&s).map_err(|e| {
+            io::Error::new(io::ErrorKind::Other, e)
+        })
     }
 
     pub fn read_from_file(config_file: &str) -> Result<ServerConfig, ParseError> {
         // parse config file
         let mut config_yaml = BTreeMap::<Yaml, Yaml>::new();
         let mut includes = VecDeque::new();
-        includes.push_back(config_file.to_owned());
+        includes.push_back((config_file.to_owned(), true));
         let mut already_visited_files = HashSet::new();
-        while let Some(ref file) = includes.pop_front() {
+        while let Some((ref file, required)) = includes.pop_front() {
             // process includes
             let file_path = match fs::canonicalize(file) {
                 Ok(path) => path,
                 Err(e) => {
-                    println!("Invalid file path {}: {}", file, e);
+                    println!("Unable to canonicalize path '{}': {}", file, e);
+                    if required {
+                        panic!("Unable to canonicalize required config '{}': {}", file, e);
+                    }
                     continue;
                 }
             };
             if !already_visited_files.contains(&file_path) {
                 already_visited_files.insert(file_path);
-                Self::merge_files(&file, &mut config_yaml, &mut includes);
+                match Self::merge_files(&file, &mut config_yaml, &mut includes) {
+                    Ok(_) => {},
+                    Err(e) => if required {
+                        panic!("Unable to load required config file '{}': {:?}", file, e);
+                    } else {
+                        println!("Loading optional config file '{}' failed: {:?}", file, e);
+                    }
+                }
             } else {
                 println!("Already visited: {:?} - Skip", &file_path);
             }
@@ -588,7 +604,7 @@ impl ServerConfig {
         // set default sane log level (we should set it to max? or max only in debug)
         // The problem is we are merging files before parsing config... 
         set_log_level(log_level, &backend, path);
-        info!("Using configuration from: {}", config_file);
+        info!("Using configuration from: {} - {:?}", config_file, config_yaml);
         let protocol_definition = try!(Self::parse_protocol_definition(&config_yaml));
         let mut methods = HashMap::<String, MethodDefinition>::new();
         let mut streams = HashMap::<String, MethodDefinition>::new();

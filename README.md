@@ -37,10 +37,12 @@ To include other configuration files use
 ```yaml
 include:
   - file 1
-  - file 2
+  - file 2: flag
 ```
 First ever appearance of method or any other definition is used and it redefinition is ignored.
 Default action for missing included file is warning (non fatal). For now maximum depth is hardcoded to 10.
+Each file path can be marked with boolean flag. If flag is **true** then config file is required, and rupicola,
+will exit with error code. Default value for flag is **false**.
 
 ### protocol
 Section used to configure bind points, auth mode and change default path to streaming and RPC subsystems.
