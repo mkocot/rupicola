@@ -26,7 +26,7 @@ use std::collections::{HashMap, VecDeque, BTreeMap, HashSet};
 use std::fs::File;
 use std::fs;
 use std::fmt;
-use libc::{gid_t, uid_t, mode_t};
+use libc::{gid_t, uid_t};
 use log::{LogRecord, LogLevelFilter, LogMetadata};
 use yaml_rust::{YamlLoader, Yaml};
 use syslog::Facility;
@@ -101,7 +101,7 @@ pub enum Protocol {
         /// Allow using private methods from loopback
         allow_private: bool,
         /// Mode to set on socket after creating
-        file_mode: mode_t,
+        file_mode: u32,
         /// Changing group ownership of socket
         file_owner_gid: gid_t,
         /// Changing ownership of socket
@@ -366,7 +366,7 @@ impl ServerConfig {
         // This Is Silly! Unable to convert value to string... 
         let file_mode = protocol_definition["mode"].as_i64().and_then(|mode| {
             match u32::from_str_radix(&format!("{}", mode), 8) {
-                Ok(m) if m <= 0o777 => Some(m as mode_t),
+                Ok(m) if m <= 0o777 => Some(m),
                 Ok(_) => {
                     info!("Invalid mode: {}", mode);
                     None

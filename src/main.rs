@@ -61,8 +61,6 @@ use lazy_response::LazyResponse;
 use rpc::{RpcHandler, get_invoke_arguments};
 use handlers::{HandlerError, ResponseHandler};
 
-use libc::mode_t;
-
 
 // Handler for incoming request
 struct SenderHandler {
@@ -412,7 +410,7 @@ impl Protocol {
                             // Ok now correct permissions for socket
                             if let Err(e) = std::fs::metadata(&address).and_then(|p| {
                                 let mut p = p.permissions();
-                                p.set_mode(file_mode as mode_t);
+                                p.set_mode(file_mode);
                                 std::fs::set_permissions(&address, p)
                             }) {
                                 error!("Unable to set permission for {}: {}", &address, e);
