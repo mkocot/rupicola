@@ -58,97 +58,103 @@ impl MethodInvoke for MethodDefinition {
             .stderr(Stdio::piped()) // Capture stderr
             .stdout(Stdio::piped()); // Capture stdout
 
-        command.spawn().and_then(|mut child| {
-            // At most limit size
-            let mut response_buffer = Vec::new();
-            let mut buffer_overrun = false;
-            // NOTE: This is wrapped inside {} to allow borrowed stdout go out of scope
-            {
-            let mut stdout = if let Some(ref mut stdout) = child.stdout {
-                stdout
-            } else {
-                panic!("No stdout - this is likely a bug in server!");
-            };
-            let mut buffer = [0; 2048];
-            loop {
-                let read = try!(stdout.read(&mut buffer[..]));
-                if read == 0 {
-                    debug!("Finished reading response from child stdout");
-                    break;
-                }
-
-                let allowed_write_size = if self.limits.max_response == 0 {
-                    read
-                } else {
-                    let remaining_response_size = cmp::max(
-                            self.limits.max_response as usize - response_buffer.len(), 0);
-                    let max_write_chunk = cmp::min(remaining_response_size, read);
-                    if max_write_chunk == 0 {
-                        error!("Exceed maximum response size! Skipping remaining data!");
-                        // TODO: Kill child?
-                        try!(copy(stdout, &mut sink()));
-                        buffer_overrun = true;
-                        break;
-                    }
-                    if max_write_chunk != read {
-                        warn!("Reached maximum allowed response size ({})",
-                            self.limits.max_response);
-                    }
-                    max_write_chunk as usize
-                };
-                if allowed_write_size > 0 {
-                    response_buffer.extend_from_slice(&buffer[0..allowed_write_size]);
-                }
-            }
-            }
-            let error_code = try!(child.wait());
-            if buffer_overrun {
-                Ok(Err((response_buffer, error_code)))
-            } else {
-                Ok(Ok((response_buffer, error_code)))
-            }
-        }).map_err(|e| {
-            error!("Failed to start command: {}", e);
-            ErrorJsonRpc::new(ErrorCode::ServerError(-32001, "Subprocedure failed to run"))
-        }).and_then(|o| {
-            // We could get there in 2 path: normal execution and clamped output execution
-            let converted_output =  match o {
-                Err((ref o, _)) | Ok((ref o, _)) => {
-                    if self.response_encoding == ResponseEncoding::Utf8 {
-                        String::from_utf8_lossy(&o).into_owned()
+        command.spawn()
+            .and_then(|mut child| {
+                // At most limit size
+                let mut response_buffer = Vec::new();
+                let mut buffer_overrun = false;
+                // NOTE: This is wrapped inside {} to allow borrowed stdout go out of scope
+                {
+                    let mut stdout = if let Some(ref mut stdout) = child.stdout {
+                        stdout
                     } else {
-                        o.to_base64(STANDARD)
-                    }
-                },
-            };
-            match o {
-                Err(_) => Err(ErrorJsonRpc::new_data(
-                        ErrorCode::ServerError(-32003,
-                                "Subprocedure exceded maximum response size"),
-                                converted_output.to_json())),
-                Ok((_, error)) if error.success() => Ok(converted_output),
-                Ok((_, error)) => {
-                    warn!("[{}] Exit with {}", self.name, error);
+                        panic!("No stdout - this is likely a bug in server!");
+                    };
+                    let mut buffer = [0; 2048];
+                    loop {
+                        let read = try!(stdout.read(&mut buffer[..]));
+                        if read == 0 {
+                            debug!("Finished reading response from child stdout");
+                            break;
+                        }
 
-                    let mut resp = HashMap::new();
-                    resp.insert("exit_code".to_owned(), error.code().unwrap_or(-1).to_json());
-                    resp.insert("result".to_owned(), converted_output.to_json());
-                    Err(ErrorJsonRpc::new_data(
-                            ErrorCode::ServerError(-32005,
-                                "Subprocedure returned error code"),
-                                resp.to_json()))
+                        let allowed_write_size = if self.limits.max_response == 0 {
+                            read
+                        } else {
+                            let remaining_response_size =
+                                cmp::max(self.limits.max_response as usize - response_buffer.len(),
+                                         0);
+                            let max_write_chunk = cmp::min(remaining_response_size, read);
+                            if max_write_chunk == 0 {
+                                error!("Exceed maximum response size! Skipping remaining data!");
+                                // TODO: Kill child?
+                                try!(copy(stdout, &mut sink()));
+                                buffer_overrun = true;
+                                break;
+                            }
+                            if max_write_chunk != read {
+                                warn!("Reached maximum allowed response size ({})",
+                                      self.limits.max_response);
+                            }
+                            max_write_chunk as usize
+                        };
+                        if allowed_write_size > 0 {
+                            response_buffer.extend_from_slice(&buffer[0..allowed_write_size]);
+                        }
+                    }
                 }
-            }
-        }).and_then(|o| {
-            Ok(o.to_json())
-        })
+                let error_code = try!(child.wait());
+                if buffer_overrun {
+                    Ok(Err((response_buffer, error_code)))
+                } else {
+                    Ok(Ok((response_buffer, error_code)))
+                }
+            })
+            .map_err(|e| {
+                error!("Failed to start command: {}", e);
+                ErrorJsonRpc::new(ErrorCode::ServerError(-32001, "Subprocedure failed to run"))
+            })
+            .and_then(|o| {
+                // We could get there in 2 path: normal execution and clamped output execution
+                let converted_output = match o {
+                    Err((ref o, _)) | Ok((ref o, _)) => {
+                        if self.response_encoding == ResponseEncoding::Utf8 {
+                            String::from_utf8_lossy(&o).into_owned()
+                        } else {
+                            o.to_base64(STANDARD)
+                        }
+                    }
+                };
+                match o {
+                    Err(_) => {
+                        Err(ErrorJsonRpc::new_data(ErrorCode::ServerError(-32003,
+                                                                          "Subprocedure exceded \
+                                                                           maximum response size"),
+                                                   converted_output.to_json()))
+                    }
+                    Ok((_, error)) if error.success() => Ok(converted_output),
+                    Ok((_, error)) => {
+                        warn!("[{}] Exit with {}", self.name, error);
+
+                        let mut resp = HashMap::new();
+                        resp.insert("exit_code".to_owned(), error.code().unwrap_or(-1).to_json());
+                        resp.insert("result".to_owned(), converted_output.to_json());
+                        Err(ErrorJsonRpc::new_data(ErrorCode::ServerError(-32005,
+                                                                          "Subprocedure \
+                                                                           returned error code"),
+                                                   resp.to_json()))
+                    }
+                }
+            })
+            .and_then(|o| Ok(o.to_json()))
     }
 }
 
 impl Handler for RpcHandler {
     fn handle(&self,
               req: &JsonRpcRequest,
-              custom: &HashMap<&str, Json>) -> Result<Json, ErrorJsonRpc> {
+              custom: &HashMap<&str, Json>)
+              -> Result<Json, ErrorJsonRpc> {
         let method = if let Some(s) = self.methods.get(req.method) {
             s
         } else {
@@ -160,8 +166,7 @@ impl Handler for RpcHandler {
         if !is_auth && !method.is_private {
             error!("[{}] Invoking public method without authorization!",
                    req.method);
-            return Err(ErrorJsonRpc::new(
-                    ErrorCode::ServerError(-32000, "Unauthorized")));
+            return Err(ErrorJsonRpc::new(ErrorCode::ServerError(-32000, "Unauthorized")));
         }
         // TODO: For now hackish solution
         // Allow not only objects but also arrays
@@ -183,7 +188,8 @@ impl Handler for RpcHandler {
             // delayed response... this is rare corner case
             // cloning method definition if perfectly acceptable
             info!("[{}] Delayed command execution. Faking response {}",
-                  req.method, fake_response);
+                  req.method,
+                  fake_response);
             let method_clone = method.clone();
             thread::spawn(move || {
                 thread::sleep(Duration::new(method_clone.delay as u64, 0));
@@ -191,7 +197,7 @@ impl Handler for RpcHandler {
                 let procedure_result = method_clone.invoke(&arguments);
                 info!("Delayed execution finished: {:?}", procedure_result);
             });
-            //This method support only utf-8 (we just spit whole json from config...)
+            // This method support only utf-8 (we just spit whole json from config...)
             return Ok(fake_response.clone());
         } else {
             return method.invoke(&arguments);
@@ -199,8 +205,7 @@ impl Handler for RpcHandler {
     }
 }
 
-pub fn get_invoke_arguments(exec_params: &[MethodParam],
-                            params: &Json) -> Result<Vec<String>, ()> {
+pub fn get_invoke_arguments(exec_params: &[MethodParam], params: &Json) -> Result<Vec<String>, ()> {
     let mut arguments = Vec::new();
     for arg in exec_params {
         match arg.unroll(&params) {
@@ -217,7 +222,8 @@ impl ResponseHandler for JsonRpcServer<RpcHandler> {
     fn handle_response(&self,
                        req: &str,
                        is_auth: bool,
-                       res: &mut Write) -> Result<(), HandlerError> {
+                       res: &mut Write)
+                       -> Result<(), HandlerError> {
         let mut custom_data = HashMap::new();
         custom_data.insert("is_auth", is_auth.to_json());
         let response = self.handle_request_custom(&req, Some(&custom_data));
@@ -231,4 +237,3 @@ impl ResponseHandler for JsonRpcServer<RpcHandler> {
         Ok(())
     }
 }
-

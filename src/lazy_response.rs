@@ -28,10 +28,10 @@ pub enum LazyResponse<'a> {
     Streaming(Response<'a, Streaming>),
 
     /// Transitive state, should never be used in normal usage
-    NONE
+    NONE,
 }
 
-impl <'a> LazyResponse<'a> {
+impl<'a> LazyResponse<'a> {
     pub fn enable_buffer(&mut self) {
         if let LazyResponse::Fresh(_, ref mut buff) = *self {
             if buff.is_none() {
@@ -45,13 +45,14 @@ impl <'a> LazyResponse<'a> {
     }
 
     pub fn new(resp: Response<'a, Fresh>) -> LazyResponse<'a> {
-       LazyResponse::Fresh(resp, None)
+        LazyResponse::Fresh(resp, None)
     }
 
     fn transition(&mut self) -> std::io::Result<()> {
         // NOTE: First check is for type check! Second one unwrap previous value
-        if let LazyResponse::Fresh(_,_) = *self {
-            if let LazyResponse::Fresh(resp, could_be_buffer) = std::mem::replace(self, LazyResponse::NONE) {
+        if let LazyResponse::Fresh(_, _) = *self {
+            if let LazyResponse::Fresh(resp, could_be_buffer) =
+                   std::mem::replace(self, LazyResponse::NONE) {
                 let mut started = try!(resp.start());
                 if let Some(buffer) = could_be_buffer {
                     error!("Transition with buffer, should not happen!");
@@ -75,16 +76,16 @@ impl <'a> LazyResponse<'a> {
             Ok(())
         }
     }
-    
+
     fn is_buffered(&self) -> bool {
         match *self {
             LazyResponse::Fresh(_, Some(_)) => true,
-            _ => false
+            _ => false,
         }
     }
 }
 
-impl <'a> Write for LazyResponse<'a> {
+impl<'a> Write for LazyResponse<'a> {
     fn flush(&mut self) -> std::io::Result<()> {
         // We need to make transition from fresh to commited
         // SKIP when buffered
@@ -112,10 +113,9 @@ impl <'a> Write for LazyResponse<'a> {
             if let LazyResponse::Streaming(ref mut w) = *self {
                 w.write(buf)
             } else {
-                //For now just assume all other states mean End Of File
+                // For now just assume all other states mean End Of File
                 Ok(0)
             }
         }
     }
 }
-

@@ -31,7 +31,7 @@ pub enum MethodParam {
     Everything,
 }
 
-///Helper trait for cleaner implementation
+/// Helper trait for cleaner implementation
 pub trait Unroll {
     /// Unroll self given set of parameters
     fn unroll(&self, params: &Json) -> Result<Option<String>, ()>;
@@ -47,7 +47,9 @@ impl Unroll for ParameterDefinition {
             Some(ref s) => {
                 let conversion_result = self.param_type.convert(s);
                 if conversion_result.is_err() {
-                    error!("Unable to convert. Value = {:?}; target type = {:?}", s, self);
+                    error!("Unable to convert. Value = {:?}; target type = {:?}",
+                           s,
+                           self);
                 }
                 conversion_result
             }
@@ -75,7 +77,7 @@ impl Unroll for MethodParam {
                 } else {
                     Ok(Some(json))
                 }
-            },
+            }
             MethodParam::Variable(ref v, skip) => {
                 match v.unroll(params) {
                     // We cannot return Ok(None) (because that wolud skip WHOLE chain)
@@ -83,15 +85,16 @@ impl Unroll for MethodParam {
                     Ok(Some(_)) if skip => Ok(Some("".to_owned())),
                     all => all,
                 }
-            },
+            }
             MethodParam::Chained(ref c) => {
                 let mut result = String::new();
                 for element in c.iter() {
                     match element.unroll(params) {
                         Ok(Some(ref o)) => result.push_str(o),
-                        skip @Ok(None) | skip @Err(_) => {
+                        skip @ Ok(None) | skip @ Err(_) => {
                             if skip.is_ok() {
-                                info!("Optional variable {:?} is missing. Skip whole chain", element);
+                                info!("Optional variable {:?} is missing. Skip whole chain",
+                                      element);
                             }
                             // Return either Ok(None) or Err(..)
                             return skip;
@@ -99,7 +102,7 @@ impl Unroll for MethodParam {
                     }
                 }
                 Ok(Some(result))
-            },
+            }
         }
     }
 }

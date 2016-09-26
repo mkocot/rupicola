@@ -76,7 +76,8 @@ impl ResponseHandler for SenderHandler {
     fn handle_response(&self,
                        req: &str,
                        is_auth: bool,
-                       res: &mut Write) -> Result<(), HandlerError> {
+                       res: &mut Write)
+                       -> Result<(), HandlerError> {
         // Read streaming method name from path
         // POST /streaming
         info!("--> {}", req);
@@ -108,7 +109,7 @@ impl ResponseHandler for SenderHandler {
             }
         };
 
-        //check for provate ones
+        // check for provate ones
         if !method.is_private && !is_auth {
             warn!("Invoking method requires auth!");
             return Err(HandlerError::Unauthorized);
@@ -143,7 +144,10 @@ impl Handler for SenderHandler {
               req.uri);
         // Enforce request read timeout
         if self.config.default_limits.request_wait != 0 {
-            if let Err(e) = req.set_read_timeout(Some(Duration::from_millis(self.config.default_limits.request_wait.into()))) {
+            if let Err(e) = req.set_read_timeout(Some(Duration::from_millis(self.config
+                .default_limits
+                .request_wait
+                .into()))) {
                 warn!("Changing timeout for request failed: {}", e);
             }
         }
@@ -157,11 +161,14 @@ impl Handler for SenderHandler {
             match req.remote_addr {
                 std::net::SocketAddr::V4(addr) => {
                     // Special case: 0.0.0.0:0 -> Unix domain socket
-                    addr.port() == 0 && addr.ip().octets() == [0, 0, 0, 0] || addr.ip().is_loopback()
-                },
+                    addr.port() == 0 && addr.ip().octets() == [0, 0, 0, 0] ||
+                    addr.ip().is_loopback()
+                }
                 std::net::SocketAddr::V6(addr) => addr.ip().is_loopback(),
             }
-        } else { false };
+        } else {
+            false
+        };
 
         // Enable this check early for normal requests
         // TODO: This almos repeat what is below in response
@@ -186,10 +193,12 @@ impl Handler for SenderHandler {
 
         // 1. Check payload size in header
         // this is sufficient as hyper relies on that
-        if let Some(&hyper::header::ContentLength(size)) = req.headers.get::<hyper::header::ContentLength>() {
+        if let Some(&hyper::header::ContentLength(size)) = req.headers
+            .get::<hyper::header::ContentLength>() {
             if size > self.config.default_limits.payload_size.into() {
                 error!("Request is too big! ({} > {})",
-                        size, self.config.default_limits.payload_size);
+                       size,
+                       self.config.default_limits.payload_size);
                 return;
             }
         } else {
@@ -219,16 +228,15 @@ impl Handler for SenderHandler {
             // Ok Some errors during processing
             match lazy {
                 LazyResponse::Fresh(ref mut resp, _) => {
-                    //Set response code etc
+                    // Set response code etc
                     *resp.status_mut() = match err {
                         HandlerError::NoSuchMethod => StatusCode::NotFound,
                         HandlerError::InvalidRequest => StatusCode::BadRequest,
-                        HandlerError::Unauthorized => StatusCode::Unauthorized
+                        HandlerError::Unauthorized => StatusCode::Unauthorized,
                     };
 
                     if !is_authorized || resp.status() == StatusCode::Unauthorized {
-                        resp.headers_mut().set_raw("WWW-Authenticate",
-                                                   vec![b"Basic".to_vec()]);
+                        resp.headers_mut().set_raw("WWW-Authenticate", vec![b"Basic".to_vec()]);
                         *resp.status_mut() = StatusCode::Unauthorized;
                     }
                 }
@@ -256,7 +264,7 @@ impl SenderHandler {
         SenderHandler {
             json_rpc: JsonRpcServer::new_handler(json_handler),
             config: conf,
-            allow_private: allow_private
+            allow_private: allow_private,
         }
     }
 
@@ -266,12 +274,12 @@ impl SenderHandler {
             let password = auth.password.clone().unwrap_or("".to_owned());
             match self.config.protocol_definition.auth.verify(&auth.username, &password) {
                 true => {
-                        info!("Access granted");
-                        return true;
-                },
+                    info!("Access granted");
+                    return true;
+                }
                 false => {
-                        warn!("Invalid username or password");
-                        return false;
+                    warn!("Invalid username or password");
+                    return false;
                 }
             }
         } else if self.config.protocol_definition.auth.required() {
@@ -293,12 +301,14 @@ impl SenderHandler {
         // Spawn child object
         let mut base_command = Command::new(&method.path);
         let command = {
-            if let RunAs::Custom { gid, uid } = method.run_as {
-                base_command.gid(gid).uid(uid)
-            } else {
-                &mut base_command
-            }}
-            .args(&arguments).stdout(Stdio::piped());
+                if let RunAs::Custom { gid, uid } = method.run_as {
+                    base_command.gid(gid).uid(uid)
+                } else {
+                    &mut base_command
+                }
+            }
+            .args(&arguments)
+            .stdout(Stdio::piped());
 
         let mut child_process = try!(command.spawn());
 
@@ -330,18 +340,18 @@ impl SenderHandler {
         let mut total_wait_time = 0;
         loop {
             match rx.try_recv() {
-                Ok((ref data, size)) => { 
+                Ok((ref data, size)) => {
                     // Reset sleep timer every time we get data
                     total_wait_time = 0;
-                    if size > 0 { 
+                    if size > 0 {
                         try!(streaming_response.write_all(&data[0..size]));
                         try!(streaming_response.flush());
                     } else {
                         info!("End Of Stream");
                     }
-                },
+                }
                 Err(std::sync::mpsc::TryRecvError::Empty) => {
-                    // This is ugly ... 
+                    // This is ugly ...
                     let wait_timeout = std::time::Duration::new(1, 0);
                     // This is inaccurate as hell
                     total_wait_time += 1000;
@@ -350,7 +360,7 @@ impl SenderHandler {
                         warn!("Timeout while waiting for data");
                         break;
                     }
-                },
+                }
                 Err(_) => {
                     info!("Channel borked");
                     break;
@@ -360,12 +370,13 @@ impl SenderHandler {
 
         Ok(())
     }
-
 }
 
 impl Protocol {
-    pub fn listen(&self, config: Arc<ServerConfig>, barrier: Arc<Barrier>)
-            -> thread::JoinHandle<()> {
+    pub fn listen(&self,
+                  config: Arc<ServerConfig>,
+                  barrier: Arc<Barrier>)
+                  -> thread::JoinHandle<()> {
         match *self {
             Protocol::Https { ref address, port, ref cert, ref key, allow_private } => {
                 let address = address.clone();
@@ -375,35 +386,38 @@ impl Protocol {
                     // TODO: Manual create context
                     //      default values use vulnerable SSLv2, SSLv3
                     let ssl = Openssl::with_cert_and_key(cert, key).unwrap();
-                    match Server::https((&address as &str, port), ssl).and_then(
-                            |s|s.handle(SenderHandler::new(config, allow_private))) {
+                    match Server::https((&address as &str, port), ssl)
+                        .and_then(|s| s.handle(SenderHandler::new(config, allow_private))) {
                         Ok(_) => info!("HTTPS listener started: {}@{}", address, port),
                         Err(e) => error!("Failed listening HTTPS {}@{}: {}", address, port, e),
                     }
-                        barrier.wait();
+                    barrier.wait();
                 })
-            },
+            }
             Protocol::Http { ref address, port, allow_private } => {
                 let address = address.clone();
                 thread::spawn(move || {
-                    match Server::http((&address as &str, port)).and_then(|s|
-                            s.handle(SenderHandler::new(config, allow_private))) {
+                    match Server::http((&address as &str, port))
+                        .and_then(|s| s.handle(SenderHandler::new(config, allow_private))) {
                         Ok(_) => info!("HTTP listener started: {}@{}", address, port),
                         Err(e) => error!("Failed listening HTTP {}@{}: {}", address, port, e),
                     }
                     barrier.wait();
                 })
-            },
-            Protocol::Unix { ref address, allow_private, file_mode, 
-                    file_owner_uid, file_owner_gid } => {
+            }
+            Protocol::Unix { ref address,
+                             allow_private,
+                             file_mode,
+                             file_owner_uid,
+                             file_owner_gid } => {
                 let address = address.clone();
                 // Try unbind, or just merilly triple over it?
                 if let Err(e) = std::fs::remove_file(&address) {
                     info!("Unlink file failed: {}", e);
                 }
                 thread::spawn(move || {
-                    match UnixSocketServer::new(&address).and_then(|s|
-                            s.handle(SenderHandler::new(config, allow_private))) {
+                    match UnixSocketServer::new(&address)
+                        .and_then(|s| s.handle(SenderHandler::new(config, allow_private))) {
                         Ok(mut l) => {
                             info!("Unix listener started: {}", &address);
 
@@ -422,17 +436,17 @@ impl Protocol {
                                 error!("Unable to set socket owner: {}", e);
                                 let _ = l.close();
                             }
-                        },
+                        }
                         Err(e) => error!("Failed listening UNIX {}: {}", &address, e),
                     }
-                    
+
                     // Clean after
                     if let Err(e) = std::fs::remove_file(&address) {
                         info!("Removing socket ({}) failed: {}", &address, e);
                     }
                     barrier.wait();
                 })
-            },
+            }
         }
     }
 }
@@ -450,7 +464,7 @@ fn main() {
 
     let matches = match opts.parse(&args[1..]) {
         Ok(m) => m,
-        Err(e) => panic!(e.to_string())
+        Err(e) => panic!(e.to_string()),
     };
 
     if matches.opt_present("h") {
@@ -459,7 +473,8 @@ This program comes with ABSOLUTELY NO WARRANTY.
 This is free software, and you are welcome to redistribute it
 under certain conditions
 
-Usage: {} [options]", program);
+Usage: {} [options]",
+                            program);
         print!("{}", opts.usage(&brief));
         return;
     }
