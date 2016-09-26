@@ -24,6 +24,7 @@ use std::io::Read;
 use std::io;
 use std::collections::{HashMap, VecDeque, BTreeMap, HashSet};
 use std::fs::File;
+use std::path::Path;
 use std::fs;
 use std::fmt;
 use libc::{gid_t, uid_t};
@@ -566,31 +567,56 @@ impl ServerConfig {
         }
     }
 
-    fn merge_files(file: &str,
-                   base: &mut BTreeMap<Yaml, Yaml>,
-                   pending: &mut VecDeque<(String, bool)>)
-                   -> io::Result<()> {
-        println!("Merging config with {}", file);
-        let config_yaml = match Self::load_yaml(file).and_then(|mut cfg| {
-            cfg.pop().ok_or(io::Error::new(io::ErrorKind::Other, "Empty document"))
-        }) {
-            Ok(cfg) => cfg,
-            Err(e) => {
-                return Err(e);
+    fn merge_files<T: AsRef<Path>>(file: T,
+                                   base: &mut BTreeMap<Yaml, Yaml>,
+                                   pending: &mut VecDeque<(String, bool)>)
+                                   -> io::Result<()> {
+        println!("Merging config with {:?}", file.as_ref());
+        // If this is file we are all set
+        // on directory entry list all "*.config" files
+        // and add to queue
+
+        if file.as_ref().is_dir() {
+            for entry in try!(file.as_ref().read_dir()) {
+                let entry = try!(entry);
+                match entry.path().extension() {
+                    None => {
+                        println!("Invalid config path {:?}", entry.path());
+                    }
+                    Some(some) if some == "conf" => {
+                        println!("Teh config");
+                        // If path is present then config is required
+                        pending.push_back((entry.path().to_string_lossy().into_owned().to_owned(),
+                                           true));
+                    }
+                    Some(_) => {
+                        println!("This is not config file: {:?}", entry.path());
+                    }
+                }
             }
-        };
-        let mut includes = Self::get_includes(&config_yaml);
-        let config_yaml = config_yaml.as_hash().unwrap();
-        if !includes.is_empty() {
-            println!("Config from {} points to another references: {:?}",
-                     file,
-                     includes);
-            pending.append(&mut includes);
+            Ok(())
+        } else {
+            let config_yaml = match Self::load_yaml(&file).and_then(|mut cfg| {
+                cfg.pop().ok_or(io::Error::new(io::ErrorKind::Other, "Empty document"))
+            }) {
+                Ok(cfg) => cfg,
+                Err(e) => {
+                    return Err(e);
+                }
+            };
+            let mut includes = Self::get_includes(&config_yaml);
+            let config_yaml = config_yaml.as_hash().unwrap();
+            if !includes.is_empty() {
+                println!("Config from {:?} points to another references: {:?}",
+                         file.as_ref(),
+                         includes);
+                pending.append(&mut includes);
+            }
+            Self::merge_dict(config_yaml, base, 0)
         }
-        Self::merge_dict(config_yaml, base, 0)
     }
 
-    fn load_yaml(config_file: &str) -> io::Result<Vec<Yaml>> {
+    fn load_yaml<T: AsRef<Path>>(config_file: T) -> io::Result<Vec<Yaml>> {
         // parse config file
         let mut f = try!(File::open(config_file));
         let mut s = String::new();
