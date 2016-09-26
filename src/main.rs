@@ -278,7 +278,9 @@ impl SenderHandler {
                     return true;
                 }
                 false => {
-                    warn!("Invalid username or password");
+                    warn!("Invalid username ({}) or password ({})",
+                          auth.username,
+                          password);
                     return false;
                 }
             }
