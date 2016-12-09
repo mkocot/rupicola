@@ -163,7 +163,6 @@ method-name:
             optional: boolean (default: false)
     invoke:
         exec: string
-        delay: int (default: 10)
         args: (default: nil)
             - arg0
             - {param: string}
@@ -174,7 +173,6 @@ method-name:
         	uid: int
     output: (default: nil)
         format: json
-        response: YAML (optional)
     limits: (default: nil)
         - fields from limits (same as global level, default: from global)
 ```
@@ -185,8 +183,6 @@ For special function it's also possible to encode raw byte output from invoked a
 All methods can require parameters. Only supported method of providing them is by-name. All parameters should have valid string name and specified type. If parameter is flagged as optional (optional: true) then all arguments using this parameters are ignored in invocation.
 
 To specify application to run it's required to set exec field to correct path.
-
-RPC methods can be invoked in 'delayed' mode. This is special case for methods which ends in terminal state (for example reboot). If response field is present then value of field 'response' is returned to user and real method execution is delayed by specified amount in delay field (in seconds).
 
 All arguments in args list are passed to executable unless:
 *    argument use optional field, and this field is missing in request,
