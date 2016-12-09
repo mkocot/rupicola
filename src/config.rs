@@ -18,7 +18,7 @@ extern crate log;
 extern crate syslog;
 
 use params::MethodParam;
-use rustc_serialize::json::{ToJson, Json};
+use rustc_serialize::json::Json;
 use std::sync::Arc;
 use std::io::Read;
 use std::io;
@@ -198,10 +198,6 @@ pub struct MethodDefinition {
     pub exec_params: Vec<MethodParam>,
     /// Variables
     pub variables: HashMap<String, Arc<ParameterDefinition>>,
-    /// Fake response used for methods with delayed execution
-    pub use_fake_response: Option<Json>,
-    /// Delayed execution in seconds
-    pub delay: u32,
     /// Response encoding
     pub response_encoding: ResponseEncoding,
     /// Private method - accessible only from loopback and without auth
@@ -262,12 +258,12 @@ impl ParameterType {
         }
     }
 
-    pub fn convert_yaml(&self, val: &Yaml) -> Result<Option<String>, ()> {
+    pub fn convert_yaml(&self, val: &Yaml) -> Result<String, ()> {
         match *val {
-            Yaml::Real(ref r) if *self == ParameterType::Number => Ok(Some(r.to_owned())),
-            Yaml::Integer(ref i) if *self == ParameterType::Number => Ok(Some(i.to_string())),
-            Yaml::Boolean(ref b) if *self == ParameterType::Bool => Ok(Some(b.to_string())),
-            Yaml::String(ref s) if *self == ParameterType::String => Ok(Some(s.to_owned())),
+            Yaml::Real(ref r) if *self == ParameterType::Number => Ok(r.to_owned()),
+            Yaml::Integer(ref i) if *self == ParameterType::Number => Ok(i.to_string()),
+            Yaml::Boolean(ref b) if *self == ParameterType::Bool => Ok(b.to_string()),
+            Yaml::String(ref s) if *self == ParameterType::String => Ok(s.to_owned()),
             _ => Err(()),
         }
     }
@@ -872,16 +868,6 @@ fn parse_method(method_name: &Yaml,
         return Err(format!("Required parameter missing: path. Skip definition for {}",
                            name));
     };
-    let delay = invoke["delay"]
-        .as_i64()
-        .and_then(|delay| {
-            if delay < 0 || delay > 30 {
-                None
-            } else {
-                Some(delay)
-            }
-        })
-        .unwrap_or(10) as u32;
 
     let params = &method_def["params"];
     // contains all required and optional parameters
@@ -908,7 +894,7 @@ fn parse_method(method_name: &Yaml,
             };
             let default_from_settings = &definition_it["default"];
             let default = if let Ok(conv) = param_type.convert_yaml(&default_from_settings) {
-                conv
+                Some(conv)
             } else {
                 if !default_from_settings.is_badvalue() {
                     error!("Provided default value {:?} cannot be converted to {:?}. Leaving \
@@ -941,9 +927,6 @@ fn parse_method(method_name: &Yaml,
             }
         }
     }
-    // For now only string...
-    let fake_response = method_def["output"]["response"].as_str().map(|json| json.to_json());
-
     let is_private = method_def["private"].as_bool().unwrap_or(false);
     // This is a bug? Sometimes rustc cant handle &String to &str conversion
     let response_encoding = match &method_def["encoding"]
@@ -958,11 +941,6 @@ fn parse_method(method_name: &Yaml,
             ResponseEncoding::Utf8
         }
     };
-
-    if response_encoding != ResponseEncoding::Utf8 && fake_response.is_some() {
-        warn!("[{}] Used encoding for fake response. This setting will be ignored",
-              name);
-    }
 
     if response_encoding != ResponseEncoding::Utf8 && streamed {
         warn!("[{}]: Encoding is ignored for streaming mode", name);
@@ -1022,8 +1000,6 @@ fn parse_method(method_name: &Yaml,
         exec_params: variables,
         // this contains mapping from invocation input to method
         variables: parameters,
-        use_fake_response: fake_response,
-        delay: delay,
         response_encoding: response_encoding,
         is_private: is_private,
         limits: method_limits,

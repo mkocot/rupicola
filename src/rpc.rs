@@ -18,8 +18,6 @@ use config::*;
 use jsonrpc::{JsonRpcServer, JsonRpcRequest, ErrorCode, ErrorJsonRpc, Handler};
 use rustc_serialize::json::{ToJson, Json};
 use rustc_serialize::base64::{STANDARD, ToBase64};
-use std::thread;
-use std::time::Duration;
 use std::process::{Command, Stdio};
 use std::collections::HashMap;
 use params::{Unroll, MethodParam};
@@ -184,24 +182,7 @@ impl Handler for RpcHandler {
         };
 
         info!("[{}] Method invoke with {:?}", req.method, arguments);
-        if let Some(ref fake_response) = method.use_fake_response {
-            // delayed response... this is rare corner case
-            // cloning method definition if perfectly acceptable
-            info!("[{}] Delayed command execution. Faking response {}",
-                  req.method,
-                  fake_response);
-            let method_clone = method.clone();
-            thread::spawn(move || {
-                thread::sleep(Duration::new(method_clone.delay as u64, 0));
-                info!("Executing delayed ({}ms) command", method_clone.delay);
-                let procedure_result = method_clone.invoke(&arguments);
-                info!("Delayed execution finished: {:?}", procedure_result);
-            });
-            // This method support only utf-8 (we just spit whole json from config...)
-            return Ok(fake_response.clone());
-        } else {
-            return method.invoke(&arguments);
-        }
+        return method.invoke(&arguments);
     }
 }
 
