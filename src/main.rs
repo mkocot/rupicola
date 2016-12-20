@@ -218,7 +218,6 @@ impl Handler for SenderHandler {
         } else if self.config.protocol_definition.stream_path == path {
             self.handle_response(&request_str, is_authorized, &mut lazy)
         } else if self.config.protocol_definition.rpc_path == path {
-            lazy.enable_buffer();
             self.json_rpc.handle_response(&request_str, is_authorized, &mut lazy)
         } else {
             error!("Unknown request path: {}", path);
@@ -228,7 +227,7 @@ impl Handler for SenderHandler {
         if let Err(err) = response {
             // Ok Some errors during processing
             match lazy {
-                LazyResponse::Fresh(ref mut resp, _) => {
+                LazyResponse::Fresh(ref mut resp) => {
                     // Set response code etc
                     *resp.status_mut() = match err {
                         HandlerError::NoSuchMethod => StatusCode::NotFound,
@@ -334,7 +333,7 @@ impl SenderHandler {
                 }
             }
         });
-
+        try!(streaming_response.flush());
         // TODO: This is ugly and hacky implementation
         let hard_limit_wait = method.limits.read_timeout;
         let mut total_wait_time = 0;

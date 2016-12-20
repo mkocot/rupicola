@@ -22,7 +22,7 @@ use hyper::net::{Fresh, Streaming};
 /// Fancy proxy for lazy hyper response
 pub enum LazyResponse<'a> {
     /// Unused inner response (expected state after error in processing request)
-    Fresh(Response<'a, Fresh>, Option<Vec<u8>>),
+    Fresh(Response<'a, Fresh>),
 
     /// Inner response already consumed (expected after writting some data)
     Streaming(Response<'a, Streaming>),
@@ -32,34 +32,18 @@ pub enum LazyResponse<'a> {
 }
 
 impl<'a> LazyResponse<'a> {
-    pub fn enable_buffer(&mut self) {
-        if let LazyResponse::Fresh(_, ref mut buff) = *self {
-            if buff.is_none() {
-                info!("Enabling buffered response");
-                *buff = Some(Vec::new());
-            }
-        } else {
-            // This is the place of great sorrow
-            warn!("Multiple invocation of enable_buffer");
-        }
-    }
-
     pub fn new(resp: Response<'a, Fresh>) -> LazyResponse<'a> {
-        LazyResponse::Fresh(resp, None)
+        LazyResponse::Fresh(resp)
     }
 
-    fn transition(&mut self) -> IoResult<()> {
+    fn transition(&mut self) {
         // NOTE: First check is for type check! Second one unwrap previous value
-        if let LazyResponse::Fresh(_, _) = *self {
-            if let LazyResponse::Fresh(resp, could_be_buffer) = mem::replace(self,
-                                                                             LazyResponse::NONE) {
+        if let LazyResponse::Fresh(_) = *self {
+            if let LazyResponse::Fresh(resp) = mem::replace(self, LazyResponse::NONE) {
                 let mut started = try!(resp.start());
-                if let Some(buffer) = could_be_buffer {
-                    error!("Transition with buffer, should not happen!");
-                    try!(started.write_all(&buffer));
-                }
                 mem::replace(self, LazyResponse::Streaming(started));
-                // if buffer is not empty then write it to response]
+            } else {
+                unreachable!();
             }
         }
         Ok(())
@@ -69,18 +53,8 @@ impl<'a> LazyResponse<'a> {
         if let LazyResponse::Streaming(s) = self {
             try!(s.end());
             Ok(())
-        } else if let LazyResponse::Fresh(resp, Some(buffer)) = self {
-            info!("Finishing with single push!");
-            resp.send(&buffer)
         } else {
             Ok(())
-        }
-    }
-
-    fn is_buffered(&self) -> bool {
-        match *self {
-            LazyResponse::Fresh(_, Some(_)) => true,
-            _ => false,
         }
     }
 }
@@ -88,34 +62,22 @@ impl<'a> LazyResponse<'a> {
 impl<'a> Write for LazyResponse<'a> {
     fn flush(&mut self) -> IoResult<()> {
         // We need to make transition from fresh to commited
-        // SKIP when buffered
-        if self.is_buffered() {
-            info!("Buffered response, skip flush.");
-            Ok(())
+        self.transition();
+        if let LazyResponse::Streaming(ref mut w) = *self {
+            w.flush()
         } else {
-            try!(self.transition());
-            if let LazyResponse::Streaming(ref mut w) = *self {
-                w.flush()
-            } else {
-                Ok(())
-            }
+            Ok(())
         }
     }
 
     fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
         // if we are buffering leave it that way
-        if let LazyResponse::Fresh(_, Some(ref mut buffer)) = *self {
-            info!("Buffered response, store data in buffer");
-            buffer.extend_from_slice(buf);
-            Ok(buf.len())
+        self.transition();
+        if let LazyResponse::Streaming(ref mut w) = *self {
+            w.write(buf)
         } else {
-            try!(self.transition());
-            if let LazyResponse::Streaming(ref mut w) = *self {
-                w.write(buf)
-            } else {
-                // For now just assume all other states mean End Of File
-                Ok(0)
-            }
+            // For now just assume all other states mean End Of File
+            Ok(0)
         }
     }
 }

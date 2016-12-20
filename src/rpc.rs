@@ -207,6 +207,7 @@ impl ResponseHandler for JsonRpcServer<RpcHandler> {
                        -> Result<(), HandlerError> {
         let mut custom_data = HashMap::new();
         custom_data.insert("is_auth", is_auth.to_json());
+        try!(res.flush().map_err(|_|HandlerError::InvalidRequest));
         let response = self.handle_request_custom(&req, Some(&custom_data));
         if let Some(response) = response {
             info!("Response: {}", response);
