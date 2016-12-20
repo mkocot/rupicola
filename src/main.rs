@@ -13,8 +13,8 @@
 //
 //    You should have received a copy of the GNU General Public License
 //    along with this program.  If not, see <http://www.gnu.org/licenses/>.
-#[cfg_attr(nightly, feature(alloc_system))]
-#[cfg(nightly)]
+#[cfg_attr(feature = "nightly", feature(alloc_system))]
+#[cfg(feature = "nightly")]
 extern crate alloc_system;
 
 // Local files/dependencies
@@ -27,7 +27,10 @@ mod misc;
 
 // External dependencies
 extern crate pwhash;
-extern crate openssl;
+
+#[cfg(feature = "with_rustls")]
+extern crate hyper_rustls;
+
 extern crate getopts;
 extern crate hyper;
 extern crate hyperlocal;
@@ -43,7 +46,6 @@ use config::*;
 use hyper::status::StatusCode;
 use hyper::server::{Server, Request, Response, Handler};
 use hyper::uri::RequestUri;
-use hyper::net::Openssl;
 use hyper::header::{Authorization, Basic};
 use hyperlocal::UnixSocketServer;
 use jsonrpc::JsonRpcServer;
@@ -60,7 +62,6 @@ use std::time::Duration;
 use lazy_response::LazyResponse;
 use rpc::{RpcHandler, get_invoke_arguments};
 use handlers::{HandlerError, ResponseHandler};
-
 
 // Handler for incoming request
 struct SenderHandler {
@@ -272,22 +273,19 @@ impl SenderHandler {
         let auth_heder = req.headers.get::<Authorization<Basic>>();
         if let Some(ref auth) = auth_heder {
             let password = auth.password.clone().unwrap_or("".to_owned());
-            match self.config.protocol_definition.auth.verify(&auth.username, &password) {
-                true => {
-                    info!("Access granted");
-                    return true;
-                }
-                false => {
-                    warn!("Invalid username ({}) or password ({})",
-                          auth.username,
-                          password);
-                    return false;
-                }
+            if self.config.protocol_definition.auth.verify(&auth.username, &password) {
+                info!("Access granted");
+                true
+            } else {
+                warn!("Invalid username ({}) or password ({})",
+                      auth.username,
+                      password);
+                false
             }
         } else if self.config.protocol_definition.auth.required() {
             // No auth provided but required
             error!("Required basic auth and got none!");
-            return false;
+            false
         } else {
             // No auth provided and no required
             true
@@ -374,6 +372,24 @@ impl SenderHandler {
     }
 }
 
+/**
+ * Create TLS processing context using Rustls
+ * */
+#[cfg(feature = "with_rustls")]
+fn prepare_ssl_context(cert: &str, key: &str) -> hyper_rustls::TlsServer {
+    let certs = hyper_rustls::util::load_certs(cert);
+    let key = hyper_rustls::util::load_private_key(key);
+    hyper_rustls::TlsServer::new(certs, key)
+}
+
+/**
+ * Create SSL/TLS processing context using Openssl
+ * */
+#[cfg(not(feature = "with_rustls"))]
+fn prepare_ssl_context(cert: &str, key: &str) -> hyper::net::Openssl {
+    hyper::net::Openssl::with_cert_and_key(cert, key).unwrap()
+}
+
 impl Protocol {
     pub fn listen(&self,
                   config: Arc<ServerConfig>,
@@ -381,13 +397,9 @@ impl Protocol {
                   -> thread::JoinHandle<()> {
         match *self {
             Protocol::Https { ref address, port, ref cert, ref key, allow_private } => {
+                let ssl = prepare_ssl_context(cert, key);
                 let address = address.clone();
-                let cert = cert.clone();
-                let key = key.clone();
                 thread::spawn(move || {
-                    // TODO: Manual create context
-                    //      default values use vulnerable SSLv2, SSLv3
-                    let ssl = Openssl::with_cert_and_key(cert, key).unwrap();
                     match Server::https((&address as &str, port), ssl)
                         .and_then(|s| s.handle(SenderHandler::new(config, allow_private))) {
                         Ok(_) => info!("HTTPS listener started: {}@{}", address, port),
