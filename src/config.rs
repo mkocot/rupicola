@@ -15,7 +15,6 @@
 //    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 extern crate log;
-extern crate syslog;
 
 use params::MethodParam;
 use rustc_serialize::json::Json;
@@ -30,7 +29,7 @@ use std::fmt;
 use libc::{gid_t, uid_t};
 use log::{LogRecord, LogLevelFilter, LogMetadata};
 use yaml_rust::{YamlLoader, Yaml};
-use syslog::Facility;
+use syslog::{self, Facility};
 use pwhash;
 use misc;
 
@@ -46,8 +45,6 @@ pub enum AuthMethod {
         login: String,
         /// Selected password checking method
         hash: String,
-        /// Force plaintext password (default false)
-        is_plaintext: bool,
     },
 }
 
@@ -55,13 +52,11 @@ impl AuthMethod {
     pub fn verify(&self, user_login: &str, user_pass: &str) -> bool {
         match *self {
             AuthMethod::None => true,
-            AuthMethod::Basic { ref login, ref hash, is_plaintext } => {
+            AuthMethod::Basic { ref login, ref hash} => {
                 // TODO: string comparison in constant time
                 let user_ok = user_login == login;
-                let plaintext_ok = is_plaintext & (user_pass == hash);
-                let crypt_ok = !is_plaintext & pwhash::unix::verify(user_pass, hash);
-
-                user_ok & (plaintext_ok | crypt_ok)
+                let crypt_ok = pwhash::unix::verify(user_pass, hash);
+                user_ok & crypt_ok
             }
         }
     }
@@ -467,15 +462,9 @@ impl ServerConfig {
                     return Err(ParseError::no_field("hash"));
                 };
 
-                let is_plaintext = basic_auth_config["is_plaintext"].as_bool().unwrap_or(false);
-                if is_plaintext {
-                    warn!("Using password as plaintext!");
-                }
-
                 Ok(AuthMethod::Basic {
                     login: login,
                     hash: pass_hash,
-                    is_plaintext: is_plaintext,
                 })
             } else {
                 warn!("Server is free4all. Consider using some kind of auth");
