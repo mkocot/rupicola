@@ -14,8 +14,8 @@
 //    You should have received a copy of the GNU General Public License
 //    along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
-use std;
-use std::io::Write;
+use std::io::{Write, Result as IoResult};
+use std::mem;
 use hyper::server::Response;
 use hyper::net::{Fresh, Streaming};
 
@@ -48,24 +48,24 @@ impl<'a> LazyResponse<'a> {
         LazyResponse::Fresh(resp, None)
     }
 
-    fn transition(&mut self) -> std::io::Result<()> {
+    fn transition(&mut self) -> IoResult<()> {
         // NOTE: First check is for type check! Second one unwrap previous value
         if let LazyResponse::Fresh(_, _) = *self {
-            if let LazyResponse::Fresh(resp, could_be_buffer) =
-                   std::mem::replace(self, LazyResponse::NONE) {
+            if let LazyResponse::Fresh(resp, could_be_buffer) = mem::replace(self,
+                                                                             LazyResponse::NONE) {
                 let mut started = try!(resp.start());
                 if let Some(buffer) = could_be_buffer {
                     error!("Transition with buffer, should not happen!");
                     try!(started.write_all(&buffer));
                 }
-                std::mem::replace(self, LazyResponse::Streaming(started));
+                mem::replace(self, LazyResponse::Streaming(started));
                 // if buffer is not empty then write it to response]
             }
         }
         Ok(())
     }
 
-    pub fn end(self) -> std::io::Result<()> {
+    pub fn end(self) -> IoResult<()> {
         if let LazyResponse::Streaming(s) = self {
             try!(s.end());
             Ok(())
@@ -86,7 +86,7 @@ impl<'a> LazyResponse<'a> {
 }
 
 impl<'a> Write for LazyResponse<'a> {
-    fn flush(&mut self) -> std::io::Result<()> {
+    fn flush(&mut self) -> IoResult<()> {
         // We need to make transition from fresh to commited
         // SKIP when buffered
         if self.is_buffered() {
@@ -102,7 +102,7 @@ impl<'a> Write for LazyResponse<'a> {
         }
     }
 
-    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+    fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
         // if we are buffering leave it that way
         if let LazyResponse::Fresh(_, Some(ref mut buffer)) = *self {
             info!("Buffered response, store data in buffer");
