@@ -120,8 +120,8 @@ pub struct Limits {
     pub request_wait: u32,
 }
 
-impl Limits {
-    pub fn new() -> Limits {
+impl Default for Limits {
+    fn default() -> Limits {
         Limits {
             read_timeout: 10000,
             exec_timeout: 0,
@@ -669,14 +669,12 @@ impl ServerConfig {
         // set default sane log level (we should set it to max? or max only in debug)
         // The problem is we are merging files before parsing config...
         set_log_level(log_level, &backend, path);
-        info!("Using configuration from: {} - {:?}",
-              config_file,
-              config_yaml);
+        info!("Using configuration from: {}", config_file);
         let protocol_definition = try!(Self::parse_protocol_definition(&config_yaml));
-        let mut methods = HashMap::<String, MethodDefinition>::new();
-        let mut streams = HashMap::<String, MethodDefinition>::new();
+        let mut methods = HashMap::new();
+        let mut streams = HashMap::new();
         info!("{:?}", config_yaml["limits"]);
-        let default_limits = Arc::new(parse_limits(&config_yaml["limits"], &Limits::new()));
+        let default_limits = Arc::new(parse_limits(&config_yaml["limits"], &Default::default()));
         info!("{:?}", default_limits);
         if let Some(methods_node) = config_yaml["methods"].as_hash() {
             parse_methods(methods_node, &mut methods, &mut streams, &default_limits);
