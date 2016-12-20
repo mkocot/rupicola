@@ -36,12 +36,11 @@ impl<'a> LazyResponse<'a> {
         LazyResponse::Fresh(resp)
     }
 
-    fn transition(&mut self) {
+    fn transition(&mut self) -> IoResult<()> {
         // NOTE: First check is for type check! Second one unwrap previous value
         if let LazyResponse::Fresh(_) = *self {
             if let LazyResponse::Fresh(resp) = mem::replace(self, LazyResponse::NONE) {
-                let mut started = try!(resp.start());
-                mem::replace(self, LazyResponse::Streaming(started));
+                mem::replace(self, LazyResponse::Streaming(try!(resp.start())));
             } else {
                 unreachable!();
             }
@@ -62,7 +61,7 @@ impl<'a> LazyResponse<'a> {
 impl<'a> Write for LazyResponse<'a> {
     fn flush(&mut self) -> IoResult<()> {
         // We need to make transition from fresh to commited
-        self.transition();
+        try!(self.transition());
         if let LazyResponse::Streaming(ref mut w) = *self {
             w.flush()
         } else {
@@ -72,7 +71,7 @@ impl<'a> Write for LazyResponse<'a> {
 
     fn write(&mut self, buf: &[u8]) -> IoResult<usize> {
         // if we are buffering leave it that way
-        self.transition();
+        try!(self.transition());
         if let LazyResponse::Streaming(ref mut w) = *self {
             w.write(buf)
         } else {
