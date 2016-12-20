@@ -6,28 +6,37 @@ authors = ["Marcin Kocot <mkocot@k.pl>>"]
 
 [dependencies]
 getopts = "^0.2"
-hyper = "^0.9"
 rustc-serialize = "^0.3"
 log = "^0.3"
 yaml-rust = "^0.3"
-clippy = {version = "*", optional = true}
-openssl = "^0.7"
-hyperlocal = "^0.2"
 libc = "^0.2"
 pwhash = "^0.1"
+hyper-rustls = "^0.2"
+syslog = "^3.0"
+quire = "*"
+
+[dev-dependencies]
+clippy = "*"
 
 [dependencies.jsonrpc]
 git = "https://github.com/mkocot/jsonrpc"
 
-[dependencies.syslog]
-git = "https://bitbucket.org/kociolek/rust-syslog.git"
+[dependencies.hyper]
+version = "^0.9"
+default-features = false
+
+[dependencies.hyperlocal]
+version = "^0"
+git = "https://github.com/mkocot/hyperlocal"
+branch = "disable_default_features_on_hyper"
+# This will disable all default features (and openssl from hyper)
 default-features = false
 
 [features]
-default = []
+with_rustls = []
+default = ["with_rustls"]
 nightly = []
-dev = ["clippy"]
 
 [profile.release]
-lto = true
-#panic = "abort"
+#lto = true
+panic = "abort"
