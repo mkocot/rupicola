@@ -52,7 +52,7 @@ impl AuthMethod {
     pub fn verify(&self, user_login: &str, user_pass: &str) -> bool {
         match *self {
             AuthMethod::None => true,
-            AuthMethod::Basic { ref login, ref hash} => {
+            AuthMethod::Basic { ref login, ref hash } => {
                 // TODO: string comparison in constant time
                 let user_ok = user_login == login;
                 let crypt_ok = pwhash::unix::verify(user_pass, hash);
@@ -148,7 +148,6 @@ pub struct ProtocolDefinition {
 pub struct ServerConfig {
     pub protocol_definition: ProtocolDefinition,
     pub methods: HashMap<String, MethodDefinition>,
-    pub streams: HashMap<String, MethodDefinition>,
     pub log_level: log::LogLevelFilter,
     // Arc to allow easy sharint this among
     // method definition
@@ -672,19 +671,17 @@ impl ServerConfig {
         info!("Using configuration from: {}", config_file);
         let protocol_definition = try!(Self::parse_protocol_definition(&config_yaml));
         let mut methods = HashMap::new();
-        let mut streams = HashMap::new();
         info!("{:?}", config_yaml["limits"]);
         let default_limits = Arc::new(parse_limits(&config_yaml["limits"], &Default::default()));
         info!("{:?}", default_limits);
         if let Some(methods_node) = config_yaml["methods"].as_hash() {
-            parse_methods(methods_node, &mut methods, &mut streams, &default_limits);
+            parse_methods(methods_node, &mut methods, &default_limits);
         }
 
         Ok(ServerConfig {
             protocol_definition: protocol_definition,
             log_level: log_level,
             methods: methods,
-            streams: streams,
             default_limits: default_limits,
         })
     }
@@ -998,7 +995,6 @@ fn parse_method(method_name: &Yaml,
 
 fn parse_methods(methods: &BTreeMap<Yaml, Yaml>,
                  rpc_config_methods: &mut HashMap<String, MethodDefinition>,
-                 str_config_methods: &mut HashMap<String, MethodDefinition>,
                  default_limits: &Arc<Limits>) {
     for (method_name, method_def) in methods {
         let method_definition = parse_method(method_name, method_def, default_limits);
@@ -1007,11 +1003,7 @@ fn parse_methods(methods: &BTreeMap<Yaml, Yaml>,
                 info!("Registered method: {}. Support streaming: {}",
                       method_definition.name,
                       method_definition.streamed);
-                if method_definition.streamed {
-                    str_config_methods.insert(method_definition.name.clone(), method_definition);
-                } else {
-                    rpc_config_methods.insert(method_definition.name.clone(), method_definition);
-                }
+                rpc_config_methods.insert(method_definition.name.clone(), method_definition);
             }
             Err(e) => warn!("Unable to parse method: {}", e),
         }

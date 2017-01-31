@@ -102,9 +102,9 @@ impl ResponseHandler for SenderHandler {
             return Err(HandlerError::InvalidRequest);
         };
 
-        let method = match self.config.streams.get(method_name) {
-            Some(s) => s,
-            None => {
+        let method = match self.config.methods.get(method_name) {
+            Some(s) if s.streamed => s,
+            _ => {
                 warn!("Requested method {} not found", method_name);
                 return Err(HandlerError::NoSuchMethod);
             }
@@ -306,7 +306,7 @@ impl SenderHandler {
                     &mut base_command
                 }
             }
-            .args(&arguments)
+            .args(arguments)
             .stdout(Stdio::piped());
 
         let mut child_process = try!(command.spawn());

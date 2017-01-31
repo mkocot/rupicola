@@ -31,6 +31,10 @@ pub struct RpcHandler {
     methods: HashMap<String, MethodDefinition>,
 }
 
+pub struct RpcHandlerInvokeContext {
+    is_auth: bool,
+}
+
 impl RpcHandler {
     /// Create new handler for RPC using given methods and names
     pub fn new(methods: HashMap<String, MethodDefinition>) -> RpcHandler {
@@ -51,7 +55,7 @@ impl MethodInvoke for MethodDefinition {
             } else {
                 &mut base_command
             }}
-            .args(&arguments)
+            .args(arguments)
             .stdin(Stdio::null()) // Ignore stdin
             .stderr(Stdio::piped()) // Capture stderr
             .stdout(Stdio::piped()); // Capture stdout
@@ -149,19 +153,17 @@ impl MethodInvoke for MethodDefinition {
 }
 
 impl Handler for RpcHandler {
-    fn handle(&self,
-              req: &JsonRpcRequest,
-              custom: &HashMap<&str, Json>)
-              -> Result<Json, ErrorJsonRpc> {
-        let method = if let Some(s) = self.methods.get(req.method) {
-            s
-        } else {
-            error!("[{}] No such method!", req.method);
-            return Err(ErrorJsonRpc::new(ErrorCode::MethodNotFound));
+    type Context = RpcHandlerInvokeContext;
+    fn handle(&self, req: &JsonRpcRequest, custom: &Self::Context) -> Result<Json, ErrorJsonRpc> {
+        let method = match self.methods.get(req.method) {
+            Some(s) if !s.streamed => s,
+            _ => {
+                error!("[{}] No such method!", req.method);
+                return Err(ErrorJsonRpc::new(ErrorCode::MethodNotFound));
+            }
         };
 
-        let is_auth = custom["is_auth"].as_boolean().unwrap_or(false);
-        if !is_auth && !method.is_private {
+        if !custom.is_auth && !method.is_private {
             error!("[{}] Invoking public method without authorization!",
                    req.method);
             return Err(ErrorJsonRpc::new(ErrorCode::ServerError(-32000, "Unauthorized")));
@@ -205,10 +207,9 @@ impl ResponseHandler for JsonRpcServer<RpcHandler> {
                        is_auth: bool,
                        res: &mut Write)
                        -> Result<(), HandlerError> {
-        let mut custom_data = HashMap::new();
-        custom_data.insert("is_auth", is_auth.to_json());
-        try!(res.flush().map_err(|_|HandlerError::InvalidRequest));
-        let response = self.handle_request_custom(&req, Some(&custom_data));
+        let custom_data = RpcHandlerInvokeContext { is_auth: is_auth };
+        try!(res.flush().map_err(|_| HandlerError::InvalidRequest));
+        let response = self.handle_request_context(&req, &custom_data);
         if let Some(response) = response {
             info!("Response: {}", response);
             if let Err(e) = res.write(&response.into_bytes()) {
