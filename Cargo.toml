@@ -1,6 +1,6 @@
 [package]
 name = "rupicola"
-version = "0.1.0"
+version = "0.2.0"
 authors = ["Marcin Kocot <mkocot@k.pl>>"]
 
 
@@ -11,9 +11,9 @@ log = "^0.3"
 yaml-rust = "^0.3"
 libc = "^0.2"
 pwhash = "^0.1"
-hyper-rustls = "^0.2"
 syslog = "^3.0"
 quire = "*"
+hyper-rustls = "^0.3"
 
 [dev-dependencies]
 clippy = "*"
@@ -22,10 +22,12 @@ clippy = "*"
 git = "https://github.com/mkocot/jsonrpc"
 
 [dependencies.hyper]
-version = "^0.9"
+version = "^0.10"
 default-features = false
 
 [dependencies.hyperlocal]
+# Hyperlocal by default download openssl
+# This branch disables downloading openssl (not required for library)
 version = "^0"
 git = "https://github.com/mkocot/hyperlocal"
 branch = "disable_default_features_on_hyper"
