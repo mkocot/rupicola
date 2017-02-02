@@ -155,6 +155,7 @@ Construction for method definition is as follow:
 ```yaml
 method-name:
     private: boolean (default: false)
+    include_stderr: boolean (default: false)
     streamed: boolean
     encoding: utf-8 | base64 (default: utf-8)
     params: (default: nil)
