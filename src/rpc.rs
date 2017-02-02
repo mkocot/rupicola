@@ -24,7 +24,9 @@ use params::{Unroll, MethodParam};
 use handlers::{ResponseHandler, HandlerError};
 use std::io::{Read, Write, copy, sink};
 use std::os::unix::process::CommandExt;
+use std::io;
 use std::cmp;
+use libc;
 
 pub struct RpcHandler {
     /// Methods registered with RPC
@@ -57,8 +59,18 @@ impl MethodInvoke for MethodDefinition {
             }}
             .args(arguments)
             .stdin(Stdio::null()) // Ignore stdin
-            .stderr(Stdio::piped()) // Capture stderr
+            .stderr(Stdio::null()) // Ignore stderr
             .stdout(Stdio::piped()); // Capture stdout
+
+        let command = if self.include_stderr {
+            command.stderr(Stdio::piped())
+            .before_exec(|| match unsafe { libc::dup2(1, 2) } {
+                       code if code >= 0 => Ok(()),
+                       code => Err(io::Error::from_raw_os_error(code))
+            })
+        } else {
+            command
+        };
 
         command.spawn()
             .and_then(|mut child| {

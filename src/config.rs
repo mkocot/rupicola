@@ -204,6 +204,8 @@ pub struct MethodDefinition {
     pub output: OutputEncoding,
     /// Method support streaming extension
     pub streamed: bool,
+    /// Include stderr in output
+    pub include_stderr: bool,
 }
 
 
@@ -977,6 +979,8 @@ fn parse_method(method_name: &Yaml,
         }
     });
 
+    let include_stderr = method_def["include_stderr"].as_bool().unwrap_or(false);
+
     Ok(MethodDefinition {
         name: name.to_owned(),
         path: path.to_owned(),
@@ -990,6 +994,7 @@ fn parse_method(method_name: &Yaml,
         run_as: run_as,
         output: output_encoding,
         streamed: streamed,
+        include_stderr: include_stderr,
     })
 }
 
