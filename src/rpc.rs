@@ -17,7 +17,7 @@
 use config::*;
 use jsonrpc::{JsonRpcServer, JsonRpcRequest, ErrorCode, ErrorJsonRpc, Handler};
 use rustc_serialize::json::{ToJson, Json};
-use rustc_serialize::base64::{STANDARD, ToBase64};
+use rustc_serialize::base64::{MIME, ToBase64};
 use std::process::{Command, Stdio};
 use std::collections::HashMap;
 use params::{Unroll, MethodParam};
@@ -71,7 +71,7 @@ impl MethodInvoke for MethodDefinition {
         } else {
             command
         };
-
+        // TODO: Timeout
         command.spawn()
             .and_then(|mut child| {
                 // At most limit size
@@ -135,7 +135,7 @@ impl MethodInvoke for MethodDefinition {
                         if self.response_encoding == ResponseEncoding::Utf8 {
                             String::from_utf8_lossy(&o).into_owned()
                         } else {
-                            o.to_base64(STANDARD)
+                            o.to_base64(MIME)
                         }
                     }
                 };
